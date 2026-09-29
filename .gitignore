@@ -1,6 +1,7 @@
 # IDE
 .vscode/
 .dist/
+.reference/
 
 # OS
 
