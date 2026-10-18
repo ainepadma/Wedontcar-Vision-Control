@@ -47,7 +47,7 @@ static void test_readiness(void)
     for (unsigned int i = 0U; i < 20U; ++i)
         track_control_observe(&state, 0, 0, 100U, 1U, 0U);
     CHECK(state.ready_frames == 1U);
-    track_control_observe(&state, 0, 0, 59U, 1U, 20U);
+    track_control_observe(&state, 0, 0, 44U, 1U, 20U);
     CHECK(state.ready_frames == 0U);
     qualify(&state, 0, 0, 40U);
     CHECK(!state.running);
@@ -218,28 +218,28 @@ static void test_default_speed_profile(void)
 {
     track_control_state_t state;
     track_control_init(&state, NULL);
-    CHECK(TRACK_SPEED_STRAIGHT == 60.0f && TRACK_SPEED_CURVE_MIN == 40.0f);
+    CHECK(TRACK_SPEED_STRAIGHT == 120.0f && TRACK_SPEED_CURVE_MIN == 80.0f);
     CHECK(state.config.speed_straight == TRACK_SPEED_STRAIGHT);
     CHECK(state.config.speed_curve_min == TRACK_SPEED_CURVE_MIN);
     qualify(&state, 0, 0, 0U);
     track_control_toggle(&state, 40U);
     track_control_output_t output = track_control_tick(&state, 50U);
-    CHECK(output.running && output.target_speed == 60.0f);
+    CHECK(output.running && output.target_speed == 120.0f);
     track_control_init(&state, NULL);
     qualify(&state, 1000, 0, 0U);
     track_control_toggle(&state, 40U);
     output = track_control_tick(&state, 50U);
-    CHECK(output.running && output.target_speed == 40.0f);
+    CHECK(output.running && output.target_speed == 80.0f);
     for (uint32_t now = 60U; now <= 400U; now += 10U)
     {
         track_control_observe(&state, 0, 0, 100U, 1U, now);
         output = track_control_tick(&state, now);
-        CHECK(output.running && output.target_speed >= 40.0f && output.target_speed <= 60.0f);
+        CHECK(output.running && output.target_speed >= 80.0f && output.target_speed <= 120.0f);
     }
     track_control_toggle(&state, 400U);
     output = track_control_tick(&state, 410U);
     CHECK(!output.running && output.target_speed == 0.0f);
-    puts("PASS shared production speed defaults 60/40, bounds and stopped zero target");
+    puts("PASS shared production speed defaults 120/80, bounds and stopped zero target");
 }
 
 static void test_loss_stop_switch(void)
@@ -249,10 +249,15 @@ static void test_loss_stop_switch(void)
     track_control_init(&state, &config);
     CHECK(state.loss_stop_enabled == 1U);
 
-    /* The override cannot start a car that never saw a valid track. */
+    /* C14 override permits an explicit C13 start without a valid track. */
     track_control_set_loss_stop(&state, 0U);
     track_control_toggle(&state, 0U);
-    CHECK(!state.running && state.stop_reason == TRACK_STOP_NOT_READY);
+    CHECK(state.running && state.stop_reason == TRACK_STOP_NONE);
+    output = track_control_tick(&state, 10U);
+    CHECK(output.running && !output.ready);
+    CHECK(output.target_speed == state.config.speed_curve_min);
+    track_control_toggle(&state, 10U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_MANUAL);
 
     qualify(&state, 300, 100, 20U);
     track_control_toggle(&state, 60U);
@@ -281,7 +286,7 @@ static void test_loss_stop_switch(void)
     CHECK(state.loss_stop_enabled == 1U);
 
     track_control_set_loss_stop(NULL, 0U);
-    puts("PASS C14 loss-stop override keeps detection/control active and never bypasses start gate");
+    puts("PASS C14 free-run override bypasses vision gates but retains explicit manual control");
 }
 
 static void test_timing_and_pd(void)
@@ -318,11 +323,11 @@ static void test_timing_and_pd(void)
     CHECK(state.running && state.derivative == 0.0f);
     track_control_observe(&state, -600, 0, 60U, 1U, 120U);
     CHECK(state.derivative == 0.0f);
-    track_control_observe(&state, -600, 0, 59U, 1U, 140U);
+    track_control_observe(&state, -600, 0, 44U, 1U, 140U);
     CHECK(state.running && state.lost_frames == 1U);
-    track_control_observe(&state, -600, 0, 59U, 1U, 160U);
+    track_control_observe(&state, -600, 0, 44U, 1U, 160U);
     CHECK(state.running && state.lost_frames == 2U);
-    track_control_observe(&state, -600, 0, 59U, 1U, 180U);
+    track_control_observe(&state, -600, 0, 44U, 1U, 180U);
     CHECK(!state.running && state.stop_reason == TRACK_STOP_LOST);
     puts("PASS uint32 wrap, actual-frame-dt filtered derivative, old/duplicate frames");
 }

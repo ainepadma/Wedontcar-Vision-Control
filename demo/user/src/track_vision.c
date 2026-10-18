@@ -44,9 +44,10 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     const uint16_t far_end = roi_start + zone_rows;
     const uint16_t minimum_width = track_max(6U, cols / 16U);
     const uint16_t maximum_width = (uint16_t)((uint32_t)cols * 4U / 5U);
-    // 每行中线最多移动约 1.6%W；短缺行只按实际行差放宽，不重新认路。
-    const uint16_t jump_per_row = track_max(2U, cols / 64U);
-    const uint16_t maximum_missing_rows = track_max(2U, rows / 40U);
+    // 弯道允许每行中线移动约 2.1%W，并跨过约 4.2%H 的短暂缺口；
+    // 宽度、密度、重叠和双边界约束仍负责拒绝灯光与零散白点。
+    const uint16_t jump_per_row = track_max(2U, cols / 48U);
+    const uint16_t maximum_missing_rows = track_max(2U, rows / 24U);
 
     uint16_t previous_row = 0;
     uint16_t previous_left = 0;
@@ -172,9 +173,9 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     }
 
     out->confidence = (uint8_t)((uint32_t)out->valid_rows * 100U / roi_rows);
-    if ((uint32_t)out->valid_rows * 100U < (uint32_t)roi_rows * 60U ||
-        (uint32_t)near_count * 100U < (uint32_t)zone_rows * 60U ||
-        (uint32_t)far_count * 100U < (uint32_t)zone_rows * 60U)
+    if ((uint32_t)out->valid_rows * 100U < (uint32_t)roi_rows * 45U ||
+        (uint32_t)near_count * 100U < (uint32_t)zone_rows * 45U ||
+        (uint32_t)far_count * 100U < (uint32_t)zone_rows * 45U)
         return;
 
     out->valid = 1U;

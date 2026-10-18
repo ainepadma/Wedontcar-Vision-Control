@@ -5,8 +5,8 @@
 
 /* Shared by firmware and host defaults; encoder counts per 10-ms tick.
  * First loaded-running tune, not a calibrated physical speed specification. */
-#define TRACK_SPEED_STRAIGHT 60.0f
-#define TRACK_SPEED_CURVE_MIN 40.0f
+#define TRACK_SPEED_STRAIGHT 120.0f
+#define TRACK_SPEED_CURVE_MIN 80.0f
 
 typedef enum
 {
@@ -75,9 +75,10 @@ void track_control_observe(track_control_state_t *state, int16_t error,
                            int16_t heading, uint8_t confidence, uint8_t valid,
                            uint32_t now_ms);
 void track_control_toggle(track_control_state_t *state, uint32_t now_ms);
-/* Image observations and steering always remain active. This switch only
- * controls automatic stop on invalid/stale camera observations. It defaults
- * enabled; encoder and no-feedback stops are never bypassed. */
+/* Image observations and steering always remain active. When disabled, this
+ * switch also bypasses the valid-track start gate and automatic invalid/stale
+ * stops. It defaults enabled; manual, encoder and no-feedback stops, plus the
+ * motor PWM ceiling, are never bypassed. */
 void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled);
 void track_control_stop(track_control_state_t *state, uint8_t reason);
 track_control_output_t track_control_tick(track_control_state_t *state,

@@ -4,7 +4,7 @@
 #include <string.h>
 
 #define TRACK_READY_FRAMES 3U
-#define TRACK_MIN_CONFIDENCE 60U
+#define TRACK_MIN_CONFIDENCE 45U
 #define TRACK_LOST_STOP_FRAMES 3U
 #define TRACK_STALE_MS 150U
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
@@ -155,7 +155,7 @@ void track_control_toggle(track_control_state_t *state, uint32_t now_ms)
         track_control_stop(state, TRACK_STOP_MANUAL);
         return;
     }
-    if (!track_ready(state, now_ms))
+    if (state->loss_stop_enabled && !track_ready(state, now_ms))
     {
         track_control_stop(state, state->has_frame &&
             (uint32_t)(now_ms - state->last_frame_ms) > TRACK_STALE_MS

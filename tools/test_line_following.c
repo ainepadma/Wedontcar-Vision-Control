@@ -266,12 +266,13 @@ static void test_straight_and_manual(simulation_t *sim, uint8_t *image)
     CHECK(sim->output.running && sim->output.ready);
     CHECK(sim->control.config.speed_straight == TRACK_SPEED_STRAIGHT);
     CHECK(sim->control.config.speed_curve_min == TRACK_SPEED_CURVE_MIN);
-    CHECK(sim->output.target_speed > TRACK_SPEED_STRAIGHT - 0.5f);
+    CHECK(sim->output.target_speed > TRACK_SPEED_STRAIGHT * 0.98f);
     CHECK(sim->output.target_speed <= TRACK_SPEED_STRAIGHT);
     CHECK(fabsf(sim->output.servo_angle - sim->control.config.servo_center) < 0.2f);
-    CHECK(sim->pwm_left > 0.0f && sim->pwm_right > 0.0f);
-    CHECK(fabsf(sim->pwm_left - sim->pwm_right) > 1.0f);
-    CHECK(sim->pid_left.integrator != 0.0f && sim->pid_right.integrator != 0.0f);
+    CHECK(sim->pwm_left == 5000.0f && sim->pwm_right == 5000.0f);
+    CHECK(isfinite(sim->pid_left.integrator) && isfinite(sim->pid_right.integrator));
+    CHECK(fabsf(sim->pid_left.integrator) <= sim->pid_left.imax);
+    CHECK(fabsf(sim->pid_right.integrator) <= sim->pid_right.imax);
     CHECK(sim->button_events == 1U); /* Holding C13 does not toggle repeatedly. */
     advance(sim, image, 0U, 4U);
     press(sim, image, 0U);
@@ -381,6 +382,19 @@ static void test_loss_stop_override(simulation_t *sim, uint8_t *image)
     CHECK(sim->pwm_left == 0.0f && sim->pwm_right == 0.0f);
     check_pid_history_zero(&sim->pid_left);
     check_pid_history_zero(&sim->pid_right);
+
+    /* With C14 protection disabled, C13 can deliberately start even while the
+     * current camera observation is invalid; C13 still stops it normally. */
+    track_control_set_loss_stop(&sim->control, 0U);
+    advance(sim, NULL, 0U, 4U);
+    press(sim, NULL, 1U);
+    CHECK(sim->output.running && !sim->output.ready);
+    CHECK(sim->output.target_speed == sim->control.config.speed_curve_min);
+    CHECK(sim->pwm_left > 0.0f && sim->pwm_right > 0.0f);
+    advance(sim, NULL, 0U, 4U);
+    press(sim, NULL, 0U);
+    CHECK(!sim->output.running && sim->output.stop_reason == TRACK_STOP_MANUAL);
+    track_control_set_loss_stop(&sim->control, 1U);
 }
 
 static void test_press_before_ready(simulation_t *sim, const uint8_t *image)
@@ -498,8 +512,10 @@ static void test_pid_feedback_and_limits(simulation_t *sim, uint8_t *image)
     const float left_error = sim->output.target_speed - 4.0f;
     const float right_error = sim->output.target_speed - 9.0f;
     /* First post-reset sample uses independent gains and t=1 (one 10-ms tick). */
-    CHECK(fabsf(sim->pwm_left - (37.0f + 0.5f + 0.25f) * left_error) < 0.001f);
-    CHECK(fabsf(sim->pwm_right - (61.0f + 0.75f + 0.5f) * right_error) < 0.001f);
+    CHECK(fabsf(sim->pwm_left - constrain_float(
+        (37.0f + 0.5f + 0.25f) * left_error, 0.0f, 5000.0f)) < 0.001f);
+    CHECK(fabsf(sim->pwm_right - constrain_float(
+        (61.0f + 0.75f + 0.5f) * right_error, 0.0f, 5000.0f)) < 0.001f);
     CHECK(sim->pid_left.last_error == left_error);
     CHECK(sim->pid_right.last_error == right_error);
     CHECK(fabsf(sim->pwm_left - sim->pwm_right) > 1.0f);

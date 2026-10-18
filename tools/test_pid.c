@@ -152,15 +152,15 @@ static void test_production_traction_pi(void)
     float previous_output;
     My_Pid_Init();
     /* Use the real production initializer, not test-only substitute gains.
-     * Straight/curve targets are 60/40 counts per 10-ms sample. */
+     * Straight/curve targets are 120/80 counts per 10-ms sample. */
     near_value(speed_pid_l.kp, 50.0f);
     near_value(speed_pid_l.ki, 0.2f);
     near_value(speed_pid_l.kd, 0.0f);
     near_value(speed_pid_l.imax, 5000.0f);
     near_value(speed_pid_l.outmin, 0.0f);
     near_value(speed_pid_l.outmax, 2000.0f);
-    near_value(PidLocCtrl(&speed_pid_l, 60.0f, 1.0f), 2000.0f);
-    near_value(PidLocCtrl(&speed_pid_r, 40.0f, 1.0f), 2000.0f);
+    near_value(PidLocCtrl(&speed_pid_l, 120.0f, 1.0f), 2000.0f);
+    near_value(PidLocCtrl(&speed_pid_r, 80.0f, 1.0f), 2000.0f);
     near_value(speed_pid_l.integrator, 0.0f);
     near_value(speed_pid_r.integrator, 0.0f);
     near_value(PidLocCtrl(&speed_pid_l, 2.0f, 1.0f), 100.4f);
