@@ -1,0 +1,353 @@
+#include <float.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "track_control.h"
+
+#define CHECK(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); \
+        exit(EXIT_FAILURE); \
+    } \
+} while (0)
+
+static const track_control_config_t config = {
+    92.5f, 100.0f, 85.0f, 20.0f, 10.0f, 0.02f, 0.0005f, 60.0f
+};
+
+static void qualify(track_control_state_t *state, int16_t error, int16_t heading,
+                    uint32_t first_ms)
+{
+    for (uint32_t i = 0U; i < 3U; ++i)
+        track_control_observe(state, error, heading, 100U, 1U, first_ms + i * 20U);
+    CHECK(state->ready_frames == 3U);
+}
+
+static void check_output(track_control_output_t output)
+{
+    CHECK(isfinite(output.servo_angle));
+    CHECK(isfinite(output.target_speed));
+    CHECK(output.target_speed >= 0.0f);
+    if (!output.running)
+        CHECK(output.target_speed == 0.0f);
+}
+
+static void test_readiness(void)
+{
+    track_control_state_t state;
+    track_control_init(&state, &config);
+    track_control_output_t output = track_control_tick(&state, 0U);
+    CHECK(!output.running && !output.ready && output.target_speed == 0.0f);
+    CHECK(output.servo_angle == config.servo_center);
+    track_control_toggle(&state, 0U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_NOT_READY);
+    track_control_observe(&state, 0, 0, 100U, 1U, 0U);
+    for (unsigned int i = 0U; i < 20U; ++i)
+        track_control_observe(&state, 0, 0, 100U, 1U, 0U);
+    CHECK(state.ready_frames == 1U);
+    track_control_observe(&state, 0, 0, 59U, 1U, 20U);
+    CHECK(state.ready_frames == 0U);
+    qualify(&state, 0, 0, 40U);
+    CHECK(!state.running);
+    track_control_toggle(&state, 80U);
+    output = track_control_tick(&state, 90U);
+    CHECK(output.running && output.ready && output.stop_reason == TRACK_STOP_NONE);
+    CHECK(output.target_speed == config.speed_straight);
+    track_control_toggle(&state, 90U);
+    output = track_control_tick(&state, 100U);
+    CHECK(!output.running && output.stop_reason == TRACK_STOP_MANUAL);
+    check_output(output);
+    puts("PASS default stop, confidence, distinct frames, manual start/stop");
+}
+
+static void test_steering_and_speed(void)
+{
+    for (int sign = -1; sign <= 1; sign += 2)
+    {
+        track_control_state_t state;
+        track_control_init(&state, &config);
+        qualify(&state, (int16_t)(sign * 1000), 0, 0U);
+        track_control_toggle(&state, 40U);
+        float previous = config.servo_center;
+        for (uint32_t now = 50U; now <= 240U; now += 10U)
+        {
+            if (now % 20U == 0U)
+                track_control_observe(&state, (int16_t)(sign * 1000), 0, 100U, 1U, now);
+            track_control_output_t output = track_control_tick(&state, now);
+            CHECK(output.running);
+            CHECK(fabsf(output.servo_angle - previous) <= 0.60001f);
+            CHECK(output.servo_angle >= 85.0f && output.servo_angle <= 100.0f);
+            CHECK(sign > 0 ? output.servo_angle <= previous : output.servo_angle >= previous);
+            CHECK(output.target_speed == config.speed_curve_min);
+            previous = output.servo_angle;
+        }
+        CHECK(previous == (sign > 0 ? config.servo_right : config.servo_left));
+    }
+    track_control_config_t reverse = config;
+    reverse.servo_left = 85.0f;
+    reverse.servo_right = 100.0f;
+    track_control_state_t state;
+    track_control_init(&state, &reverse);
+    qualify(&state, 500, 0, 0U);
+    track_control_toggle(&state, 40U);
+    CHECK(track_control_tick(&state, 50U).servo_angle > config.servo_center);
+    puts("PASS semantic steering direction, endpoints, slew rate and curve slowdown");
+}
+
+static void test_independent_servo_center(void)
+{
+    track_control_state_t defaults;
+    track_control_init(&defaults, NULL);
+    CHECK(defaults.config.servo_center == 92.5f);
+    CHECK(config.servo_center == 92.5f);
+
+    track_control_config_t asymmetric = config;
+    asymmetric.servo_center = 96.25f;
+    CHECK(asymmetric.servo_center !=
+          (asymmetric.servo_left + asymmetric.servo_right) * 0.5f);
+    for (int sign = -1; sign <= 1; sign += 2)
+    {
+        track_control_state_t state;
+        track_control_init(&state, &asymmetric);
+        CHECK(state.servo_angle == asymmetric.servo_center);
+        qualify(&state, (int16_t)(sign * 1000), 0, 0U);
+        track_control_toggle(&state, 40U);
+        float previous = asymmetric.servo_center;
+        for (uint32_t now = 50U; now <= 440U; now += 10U)
+        {
+            if (now % 20U == 0U)
+                track_control_observe(&state, (int16_t)(sign * 1000), 0,
+                                      100U, 1U, now);
+            track_control_output_t output = track_control_tick(&state, now);
+            check_output(output);
+            CHECK(output.running);
+            CHECK(output.servo_angle >= asymmetric.servo_right);
+            CHECK(output.servo_angle <= asymmetric.servo_left);
+            CHECK(fabsf(output.servo_angle - previous) <= 0.60001f);
+            CHECK(sign > 0 ? output.servo_angle <= previous : output.servo_angle >= previous);
+            if (now == 50U)
+            {
+                CHECK(sign > 0 ? output.servo_angle < asymmetric.servo_center
+                               : output.servo_angle > asymmetric.servo_center);
+                CHECK(fabsf(fabsf(output.servo_angle - previous) - 0.6f) < 0.00001f);
+            }
+            previous = output.servo_angle;
+        }
+        CHECK(previous == (sign > 0 ? asymmetric.servo_right : asymmetric.servo_left));
+
+        /* Keep the default PD/filter settings and allow their transient to settle.
+         * Zero error must return to the calibrated center, not endpoint average. */
+        for (uint32_t now = 450U; now <= 2440U; now += 10U)
+        {
+            if (now % 20U == 0U)
+                track_control_observe(&state, 0, 0, 100U, 1U, now);
+            track_control_output_t output = track_control_tick(&state, now);
+            check_output(output);
+            CHECK(output.running);
+            CHECK(output.servo_angle >= asymmetric.servo_right);
+            CHECK(output.servo_angle <= asymmetric.servo_left);
+            CHECK(fabsf(output.servo_angle - previous) <= 0.60001f);
+            previous = output.servo_angle;
+        }
+        CHECK(fabsf(previous - asymmetric.servo_center) < 0.0001f);
+        CHECK(fabsf(previous - 92.5f) > 3.0f);
+    }
+    puts("PASS independent calibrated center, both directions, zero return, bounds/rate, default 92.5");
+}
+
+static void test_loss_stale_and_encoder(void)
+{
+    const uint8_t reasons[] = {
+        TRACK_STOP_LOST, TRACK_STOP_STALE, TRACK_STOP_ENCODER, TRACK_STOP_NO_FEEDBACK
+    };
+    for (unsigned int i = 0U; i < sizeof(reasons) / sizeof(reasons[0]); ++i)
+    {
+        track_control_state_t state;
+        track_control_init(&state, &config);
+        qualify(&state, 0, 0, 0U);
+        track_control_toggle(&state, 40U);
+        if (reasons[i] == TRACK_STOP_LOST)
+            track_control_observe(&state, 0, 0, 100U, 0U, 60U);
+        else if (reasons[i] == TRACK_STOP_STALE)
+        {
+            CHECK(track_control_tick(&state, 190U).running);
+            (void)track_control_tick(&state, 191U);
+        }
+        else
+            track_control_stop(&state, reasons[i]);
+        track_control_output_t output = track_control_tick(&state, 200U);
+        CHECK(!output.running && !output.ready && output.stop_reason == reasons[i]);
+        check_output(output);
+        qualify(&state, 0, 0, 220U);
+        output = track_control_tick(&state, 270U);
+        CHECK(!output.running && output.ready && output.stop_reason == reasons[i]);
+        check_output(output);
+        track_control_toggle(&state, 270U);
+        CHECK(track_control_tick(&state, 280U).running);
+    }
+    track_control_state_t state;
+    track_control_init(&state, &config);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+    track_control_observe(&state, 0, 0, 100U, 1U, 200U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_STALE && state.ready_frames == 1U);
+    puts("PASS lost/stale/reverse/no-feedback latches, exact stale boundary, recovery needs toggle");
+}
+
+static void test_default_speed_profile(void)
+{
+    track_control_state_t state;
+    track_control_init(&state, NULL);
+    CHECK(TRACK_SPEED_STRAIGHT == 30.0f && TRACK_SPEED_CURVE_MIN == 20.0f);
+    CHECK(state.config.speed_straight == TRACK_SPEED_STRAIGHT);
+    CHECK(state.config.speed_curve_min == TRACK_SPEED_CURVE_MIN);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+    track_control_output_t output = track_control_tick(&state, 50U);
+    CHECK(output.running && output.target_speed == 30.0f);
+    track_control_init(&state, NULL);
+    qualify(&state, 1000, 0, 0U);
+    track_control_toggle(&state, 40U);
+    output = track_control_tick(&state, 50U);
+    CHECK(output.running && output.target_speed == 20.0f);
+    for (uint32_t now = 60U; now <= 400U; now += 10U)
+    {
+        track_control_observe(&state, 0, 0, 100U, 1U, now);
+        output = track_control_tick(&state, now);
+        CHECK(output.running && output.target_speed >= 20.0f && output.target_speed <= 30.0f);
+    }
+    track_control_toggle(&state, 400U);
+    output = track_control_tick(&state, 410U);
+    CHECK(!output.running && output.target_speed == 0.0f);
+    puts("PASS shared production speed defaults 30/20, bounds and stopped zero target");
+}
+
+static void test_timing_and_pd(void)
+{
+    track_control_state_t state;
+    track_control_init(&state, &config);
+    qualify(&state, 1000, 0, UINT32_MAX - 49U);
+    track_control_toggle(&state, UINT32_MAX - 9U);
+    track_control_output_t output = track_control_tick(&state, 0U);
+    CHECK(output.running && fabsf(output.servo_angle - 91.9f) < 0.0001f);
+    track_control_observe(&state, 1000, 0, 100U, 1U, 10U);
+    CHECK(state.derivative == 0.0f);
+    track_control_observe(&state, 0, 0, 100U, 1U, 30U);
+    CHECK(fabsf(state.filtered_error - (2000.0f / 3.0f)) < 0.001f);
+    CHECK(fabsf(state.derivative - (-12500.0f / 3.0f)) < 0.01f);
+    CHECK(track_control_tick(&state, 180U).running);
+    CHECK(!track_control_tick(&state, 181U).running);
+    CHECK(state.stop_reason == TRACK_STOP_STALE);
+    track_control_init(&state, &config);
+    track_control_observe(&state, 0, 0, 100U, 1U, 100U);
+    track_control_observe(&state, 0, 0, 100U, 1U, 99U);
+    CHECK(state.ready_frames == 1U && state.last_frame_ms == 100U);
+    track_control_observe(&state, 0, 0, 100U, 0U, 100U);
+    CHECK(state.ready_frames == 0U);
+    track_control_init(&state, &config);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+    track_control_observe(&state, 0, 0, 60U, 1U, 60U);
+    track_control_observe(&state, 600, 0, 60U, 1U, 100U);
+    CHECK(fabsf(state.filtered_error - 300.0f) < 0.001f);
+    CHECK(fabsf(state.derivative - 3000.0f) < 0.01f);
+    track_control_toggle(&state, 100U);
+    track_control_toggle(&state, 100U);
+    CHECK(state.running && state.derivative == 0.0f);
+    track_control_observe(&state, -600, 0, 60U, 1U, 120U);
+    CHECK(state.derivative == 0.0f);
+    track_control_observe(&state, -600, 0, 59U, 1U, 140U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_LOST);
+    puts("PASS uint32 wrap, actual-frame-dt filtered derivative, old/duplicate frames");
+}
+
+static void test_randomized_invariants(void)
+{
+    track_control_state_t state;
+    uint32_t random = UINT32_C(123456789);
+    uint32_t now = UINT32_MAX - 1000U;
+    track_control_init(&state, &config);
+    for (unsigned int i = 0U; i < 10000U; ++i)
+    {
+        random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+        now += 10U;
+        uint8_t previously_running = state.running;
+        uint8_t toggled = 0U;
+        float previous_angle = state.servo_angle;
+        if (i % 2U == 0U)
+        {
+            int16_t error = (int16_t)((int32_t)(random % 2001U) - 1000);
+            int16_t heading = (int16_t)((int32_t)((random >> 8) % 2001U) - 1000);
+            track_control_observe(&state, error, heading, 100U,
+                                  (uint8_t)(random % 23U != 0U), now);
+        }
+        if (random % 17U == 0U)
+        {
+            track_control_toggle(&state, now);
+            toggled = 1U;
+        }
+        if (random % 101U == 0U)
+            track_control_stop(&state, TRACK_STOP_ENCODER);
+        track_control_output_t output = track_control_tick(&state, now);
+        check_output(output);
+        CHECK(output.servo_angle >= 85.0f && output.servo_angle <= 100.0f);
+        CHECK(fabsf(output.servo_angle - previous_angle) <= 0.60001f);
+        CHECK(state.ready_frames <= 3U);
+        CHECK(!output.running || output.ready);
+        CHECK(!output.running || (output.target_speed >= 10.0f && output.target_speed <= 20.0f));
+        CHECK(previously_running || toggled || !output.running);
+    }
+    puts("PASS 10000 mixed frames/toggles/faults retain bounds and never auto-start");
+}
+
+static void test_abnormal_inputs(void)
+{
+    track_control_state_t state;
+    track_control_config_t bad = {NAN, INFINITY, -INFINITY, NAN, INFINITY,
+                                  INFINITY, NAN, -1.0f};
+    track_control_init(&state, &bad);
+    qualify(&state, INT16_MAX, INT16_MIN, 0U);
+    track_control_toggle(&state, 40U);
+    check_output(track_control_tick(&state, 50U));
+    bad = config;
+    bad.kp = FLT_MAX;
+    bad.kd = FLT_MAX;
+    bad.max_servo_rate_deg_s = FLT_MAX;
+    bad.speed_straight = FLT_MAX;
+    bad.speed_curve_min = -FLT_MAX;
+    track_control_init(&state, &bad);
+    qualify(&state, INT16_MAX, INT16_MIN, 0U);
+    track_control_toggle(&state, 40U);
+    for (uint32_t now = 50U; now < 2000U; now += 10U)
+    {
+        track_control_observe(&state, now % 20U ? INT16_MIN : INT16_MAX,
+                              INT16_MAX, 255U, 1U, now);
+        check_output(track_control_tick(&state, now));
+    }
+    track_control_stop(&state, 255U);
+    check_output(track_control_tick(&state, 2000U));
+    track_control_init(NULL, NULL);
+    track_control_observe(NULL, 0, 0, 0U, 0U, 0U);
+    track_control_toggle(NULL, 0U);
+    track_control_stop(NULL, TRACK_STOP_ENCODER);
+    check_output(track_control_tick(NULL, 0U));
+    track_control_init(&state, NULL);
+    check_output(track_control_tick(&state, 0U));
+    puts("PASS bounded malformed samples/configuration, finite outputs and null guards");
+}
+
+int main(void)
+{
+    test_readiness();
+    test_steering_and_speed();
+    test_independent_servo_center();
+    test_loss_stale_and_encoder();
+    test_default_speed_profile();
+    test_timing_and_pd();
+    test_abnormal_inputs();
+    test_randomized_invariants();
+    puts("All track-control host tests passed.");
+    return EXIT_SUCCESS;
+}

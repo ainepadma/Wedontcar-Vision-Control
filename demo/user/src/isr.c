@@ -36,11 +36,63 @@
 #include "zf_common_headfile.h"
 #include "isr.h"
 #include "main.h"
+#include "motor_switch.h"
 
 int16 encoder_data_1 = 0;
 int16 encoder_data_2 = 0;
 int16 encoder_data_3 = 0;
 int16 encoder_data_4 = 0;
+volatile uint8_t motor_enabled = 0;
+volatile uint8_t motor_feedback_fault = 0;
+volatile uint8_t track_ready = 0;
+volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
+volatile int16_t track_servo_tenths = 0;
+static motor_switch_t motor_switch_state;
+static motor_feedback_watchdog_t motor_feedback_watchdog;
+static track_control_state_t track_control;
+static volatile uint32_t control_clock_ms;
+static uint32_t consumed_frame_generation;
+
+// 主循环只发布观测，中断独占控制器、PID 和 PWM，防止停机后被旧帧重新写入。
+static volatile struct
+{
+    int16_t error, heading;
+    uint8_t confidence, valid;
+    uint32_t observed_ms, generation;
+} track_mailbox;
+
+void track_runtime_init(void)
+{
+    const track_control_config_t config = {
+        .servo_center = SERVO_MOTOR_CENTER,
+        .servo_left = SERVO_MOTOR_L_MAX,
+        .servo_right = SERVO_MOTOR_R_MAX,
+        .speed_straight = TRACK_SPEED_STRAIGHT,
+        .speed_curve_min = TRACK_SPEED_CURVE_MIN,
+        .kp = TRACK_STEER_KP,
+        .kd = TRACK_STEER_KD,
+        .max_servo_rate_deg_s = TRACK_SERVO_RATE_DEG_S
+    };
+    track_control_init(&track_control, &config);
+    motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+    speed_target = 0.0f;
+    motor_enabled = 0;
+    track_servo_tenths = (int16_t)(track_control.servo_angle * 10.0f);
+}
+
+void track_frame_publish(const track_vision_result_t *result)
+{
+    // 临界区只复制几个标量，不包含整帧复制/图像计算或 SPI/串口操作。
+    uint32_t primask = interrupt_global_disable();
+    track_mailbox.error = result->error;
+    track_mailbox.heading = result->heading;
+    track_mailbox.confidence = result->confidence;
+    track_mailbox.valid = result->valid;
+    track_mailbox.observed_ms = control_clock_ms;
+    ++track_mailbox.generation;
+    __DMB();
+    interrupt_global_enable(primask);
+}
 
 
 
@@ -59,26 +111,101 @@ void PIT_IRQHandler(void)
 {
     if (pit_flag_get(PIT_CH0))
     {
-        // 获取编码器读数
-        encoder_data_1 = -encoder_get_count(ENCODER_1); // 获取编码器计数
-        encoder_clear_count(ENCODER_1);                // 清空编码器计数
-        encoder_data_2 = +encoder_get_count(ENCODER_2);
-        encoder_clear_count(ENCODER_2);
+        control_clock_ms += SPEED_CONTROL_PERIOD_MS;
+        uint8_t was_running = motor_enabled;
+        if (track_mailbox.generation != consumed_frame_generation)
+        {
+            consumed_frame_generation = track_mailbox.generation;
+            track_control_observe(&track_control, track_mailbox.error, track_mailbox.heading,
+                                  track_mailbox.confidence, track_mailbox.valid,
+                                  track_mailbox.observed_ms);
+        }
+        // 独立于图像主循环：30ms 去抖，长按不连发，上电按住不启动。
+        uint8_t button_pressed = motor_switch_sample(&motor_switch_state,
+                                                     gpio_get_level(MOTOR_TOGGLE_KEY) == GPIO_LOW);
+        if (button_pressed)
+        {
+            motor_feedback_fault = 0;
+            track_control_toggle(&track_control, control_clock_ms);
+        }
 
-        // 编码器值即为速度值
-        speed_real = encoder_data_1;
-        // PID更新 
-        speed_pwm = PidLocCtrl(&speed_pid_l, speed_target - speed_real, 1.f);
-        // 只考虑一个方向转动
-        pwm_set_duty(MOTOR1_PWM, MAX(speed_pwm, 0));
-        gpio_set_level(MOTOR1_DIR, MOTOR1_FORWARD_DIR_LEVEL);
-        // 编码器值即为速度值
-        speed_real = encoder_data_2;
-        // PID更新 
-        speed_pwm = PidLocCtrl(&speed_pid_r, speed_target - speed_real, 1.f);
-        // 只考虑一个方向转动
-        pwm_set_duty(MOTOR2_PWM, MAX(speed_pwm, 0));
-        gpio_set_level(MOTOR2_DIR, MOTOR2_FORWARD_DIR_LEVEL);
+        // 获取编码器读数
+        encoder_data_1 = ENCODER_1_FORWARD_SIGN * encoder_get_count(ENCODER_1);
+        encoder_clear_count(ENCODER_1);                // 清空编码器计数
+        encoder_data_2 = ENCODER_2_FORWARD_SIGN * encoder_get_count(ENCODER_2);
+        encoder_clear_count(ENCODER_2);
+        // 分别保留两轮测量值；停机后的滑行也是真实反馈，不伪装成零速。
+        speed_real_l = encoder_data_1;
+        speed_real_r = encoder_data_2;
+        speed_real = speed_real_r; // 兼容旧调试变量，明确仅代表右轮。
+
+        // 编码器极性要按实车标定，不能随 DIR 盲目取反或用绝对值掩盖。
+        // 任何反号反馈都先锁定停机，禁止它进入正目标 PID 导致输出增大。
+        if (track_control.running && motor_feedback_fault_mask(encoder_data_1, encoder_data_2))
+        {
+            motor_feedback_fault = motor_feedback_fault_mask(encoder_data_1, encoder_data_2);
+            track_control_stop(&track_control, TRACK_STOP_ENCODER);
+        }
+
+        // 编码器反号优先；用上一周期实际 PWM 对应本周期读到的反馈。
+        // 单轮连续 500ms 有驱动却几乎无正计数，锁停两轮，防止 PI 堵转加力。
+        uint8_t no_feedback = motor_feedback_watchdog_sample(&motor_feedback_watchdog,
+            (uint8_t)(was_running && track_control.running),
+            encoder_data_1, encoder_data_2, (uint32_t)speed_pwm_l, (uint32_t)speed_pwm_r);
+        if (no_feedback)
+        {
+            motor_feedback_fault = no_feedback;
+            track_control_stop(&track_control, TRACK_STOP_NO_FEEDBACK);
+        }
+
+        track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
+        motor_enabled = output.running;
+        motor_switch_state.enabled = output.running;
+        track_ready = output.ready;
+        track_stop_reason = output.stop_reason;
+        track_servo_tenths = (int16_t)(output.servo_angle * 10.0f);
+        const float target_counts = output.target_speed; // 同一周期两轮使用同一个目标快照。
+        speed_target = target_counts;
+        if (button_pressed || was_running != motor_enabled)
+        {
+            // 用户停机、丢线、停帧和编码器故障都通过同一条归零路径。
+            pwm_set_duty(MOTOR1_PWM, 0);
+            pwm_set_duty(MOTOR2_PWM, 0);
+            // 只清历史，不重新加载参数，保留将来分别标定的左右轮增益。
+            Pid_Reset(&speed_pid_l);
+            Pid_Reset(&speed_pid_r);
+            motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+            speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
+        }
+
+        if (motor_enabled)
+        {
+            // 舵机只在用户启动且视觉有效时输出，控制器已经完成角度限幅与限速。
+            pwm_set_duty(SERVO_MOTOR_PWM, SERVO_MOTOR_DUTY(output.servo_angle));
+            // 保留已实测极性与曲率降速关系；有界 PI 增加低速负载补偿。
+            // t=1 表示一个 10ms 采样周期，不是 1 秒；P=50、I=0.2、D=0。
+            speed_pwm_l = PidLocCtrl(&speed_pid_l, target_counts - speed_real_l, 1.f);
+            // 最终驱动防线仍保留非负/硬件满量程限制，并同步内部输出状态。
+            speed_pwm_l = constrain_float(speed_pwm_l, 0.0f, (float)PWM_DUTY_MAX);
+            speed_pid_l.out = speed_pwm_l;
+            gpio_set_level(MOTOR1_DIR, MOTOR1_FORWARD_DIR_LEVEL);
+            pwm_set_duty(MOTOR1_PWM, (uint32_t)speed_pwm_l);
+
+            speed_pwm_r = PidLocCtrl(&speed_pid_r, target_counts - speed_real_r, 1.f);
+            speed_pwm_r = constrain_float(speed_pwm_r, 0.0f, (float)PWM_DUTY_MAX);
+            speed_pid_r.out = speed_pwm_r;
+            gpio_set_level(MOTOR2_DIR, MOTOR2_FORWARD_DIR_LEVEL);
+            pwm_set_duty(MOTOR2_PWM, (uint32_t)speed_pwm_r);
+            speed_pwm = speed_pwm_r;
+        }
+        else
+        {
+            // 停机是撤销驱动 PWM（非主动制动），不计算 PID、不积累积分。
+            pwm_set_duty(MOTOR1_PWM, 0);
+            pwm_set_duty(MOTOR2_PWM, 0);
+            pwm_set_duty(SERVO_MOTOR_PWM, 0);
+            speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
+        }
 
         pit_flag_clear(PIT_CH0);
     }
@@ -103,6 +230,7 @@ void PIT_IRQHandler(void)
 
 void LPUART1_IRQHandler(void)
 {
+    assistant_uart_tx_irq_handler();
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
         // 接收中断
@@ -113,6 +241,7 @@ void LPUART1_IRQHandler(void)
     }
         
     LPUART_ClearStatusFlags(LPUART1, kLPUART_RxOverrunFlag);    // 不允许删除
+    __DSB();
 }
 
 void LPUART2_IRQHandler(void)

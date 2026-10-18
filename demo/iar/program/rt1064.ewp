@@ -1738,6 +1738,12 @@
         <file>
             <name>$PROJ_DIR$\..\..\user\src\pid.c</name>
         </file>
+        <file>
+            <name>$PROJ_DIR$\..\..\user\src\track_vision.c</name>
+        </file>
+        <file>
+            <name>$PROJ_DIR$\..\..\user\src\track_control.c</name>
+        </file>
     </group>
     <group>
         <name>user_h</name>

@@ -74,8 +74,8 @@
 //--------------------------------------------------------------------------------------------------
 // 摄像头默认参数配置 在此修改摄像头配置
 //--------------------------------------------------------------------------------------------------
-#define MT9V03X_W               (188)                                           // 图像宽度     范围 [1-752]
-#define MT9V03X_H               (120)                                           // 图像高度     范围 [1-480]
+#define MT9V03X_W               (376)                                           // 图像宽度     范围 [1-752]
+#define MT9V03X_H               (240)                                           // 图像高度     范围 [1-480]
 #define MT9V03X_IMAGE_SIZE      (MT9V03X_W * MT9V03X_H)                         // 
 
 #define MT9V03X_AUTO_EXP_DEF    (0  )                                           // 自动曝光设置     默认不开启自动曝光设置  范围 [0-63] 0为关闭
@@ -125,6 +125,7 @@ typedef enum
 }m9v03x_type_enum;
 
 extern vuint8   mt9v03x_finish_flag;                                            // 一场图像采集完成标志位
+extern volatile uint32 mt9v03x_frame_count;                                     // CSI 实际完成帧数，不等同于处理/显示帧数
 extern uint8    (*mt9v03x_image)[MT9V03X_W];
 
 uint16      mt9v03x_get_version         (void);

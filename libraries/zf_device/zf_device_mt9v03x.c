@@ -61,6 +61,7 @@
 #include "zf_device_mt9v03x.h"
 
 vuint8 mt9v03x_finish_flag = 0;                                                  // 一场图像采集完成标志位
+volatile uint32 mt9v03x_frame_count = 0;
 // 图像缓冲区  如果用户需要访问图像数据 最好通过mt9v03x_csi_image来访问数据，最好不要直接访问缓冲区
 AT_DTCM_SECTION_ALIGN(uint8 mt9v03x_image1[MT9V03X_H][MT9V03X_W], 64);
 AT_DTCM_SECTION_ALIGN(uint8 mt9v03x_image2[MT9V03X_H][MT9V03X_W], 64);
@@ -401,6 +402,7 @@ void mt9v03x_finished_callback(CSI_Type *base, csi_handle_t *handle, status_t st
             mt9v03x_image = mt9v03x_image2; // image_csi2采集完成
             csi_add_empty_buffer(&csi_handle, mt9v03x_image1[0]);
         }
+        ++mt9v03x_frame_count;
         mt9v03x_finish_flag = 1;            // 采集完成标志位置一
     }
 }

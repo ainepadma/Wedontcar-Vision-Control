@@ -404,6 +404,16 @@
               <FileType>1</FileType>
               <FilePath>..\user\src\pid.c</FilePath>
             </File>
+            <File>
+              <FileName>track_vision.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\track_vision.c</FilePath>
+            </File>
+            <File>
+              <FileName>track_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\track_control.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
