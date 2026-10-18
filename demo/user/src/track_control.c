@@ -5,8 +5,10 @@
 
 #define TRACK_READY_FRAMES 3U
 #define TRACK_MIN_CONFIDENCE 60U
+#define TRACK_LOST_STOP_FRAMES 3U
 #define TRACK_STALE_MS 150U
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
+#define TRACK_HEADING_WEIGHT 1.25
 
 static double track_clamp(double value, double low, double high)
 {
@@ -59,6 +61,7 @@ void track_control_init(track_control_state_t *state,
         0.0f, track_finite_or(safe.max_servo_rate_deg_s, 0.0f));
     memset(state, 0, sizeof(*state));
     state->config = safe;
+    state->loss_stop_enabled = 1U;
     state->servo_angle = safe.servo_center;
     state->stop_reason = TRACK_STOP_MANUAL;
 }
@@ -99,7 +102,7 @@ void track_control_observe(track_control_state_t *state, int16_t error,
         return;
     if (state->has_frame && elapsed > TRACK_STALE_MS)
     {
-        if (state->running)
+        if (state->running && state->loss_stop_enabled)
             track_control_stop(state, TRACK_STOP_STALE);
         state->ready_frames = 0U;
         state->frame_valid = 0U;
@@ -109,7 +112,10 @@ void track_control_observe(track_control_state_t *state, int16_t error,
     state->last_frame_ms = now_ms;
     if (!valid || confidence < TRACK_MIN_CONFIDENCE)
     {
-        if (state->running)
+        if (state->lost_frames < TRACK_LOST_STOP_FRAMES)
+            ++state->lost_frames;
+        if (state->running && state->loss_stop_enabled &&
+            state->lost_frames >= TRACK_LOST_STOP_FRAMES)
             track_control_stop(state, TRACK_STOP_LOST);
         state->frame_valid = 0U;
         state->ready_frames = 0U;
@@ -117,6 +123,7 @@ void track_control_observe(track_control_state_t *state, int16_t error,
         state->derivative_ready = 0U;
         return;
     }
+    state->lost_frames = 0U;
     state->frame_valid = 1U;
     if (state->ready_frames < TRACK_READY_FRAMES)
         ++state->ready_frames;
@@ -163,6 +170,16 @@ void track_control_toggle(track_control_state_t *state, uint32_t now_ms)
     state->has_tick = 1U;
 }
 
+void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled)
+{
+    if (state == NULL)
+        return;
+    enabled = enabled != 0U ? 1U : 0U;
+    state->loss_stop_enabled = enabled;
+    if (enabled && state->running && state->has_frame && !state->frame_valid)
+        track_control_stop(state, TRACK_STOP_LOST);
+}
+
 track_control_output_t track_control_tick(track_control_state_t *state,
                                          uint32_t now_ms)
 {
@@ -175,19 +192,23 @@ track_control_output_t track_control_tick(track_control_state_t *state,
         elapsed = 0U;
     state->last_tick_ms = now_ms;
     state->has_tick = 1U;
-    if (state->has_frame && !track_frame_fresh(state, now_ms))
+    if (state->has_frame &&
+        (uint32_t)(now_ms - state->last_frame_ms) > TRACK_STALE_MS)
     {
-        if (state->running)
-            track_control_stop(state, state->frame_valid
-                ? TRACK_STOP_STALE : TRACK_STOP_LOST);
+        if (state->running && state->loss_stop_enabled)
+            track_control_stop(state, TRACK_STOP_STALE);
         state->ready_frames = 0U;
         state->frame_valid = 0U;
     }
     if (state->running)
     {
         const track_control_config_t *cfg = &state->config;
+        /* Curve-centre placement can produce a small cross-track error with a
+         * large look-ahead heading. Let heading dominate in that case so the
+         * car turns into the bend instead of continuing almost straight. */
         double mixed_error = track_clamp((double)state->filtered_error +
-                                        0.35 * state->filtered_heading, -1000.0, 1000.0);
+                                        TRACK_HEADING_WEIGHT * state->filtered_heading,
+                                        -1000.0, 1000.0);
         double correction = (double)cfg->kp * mixed_error +
                             (double)cfg->kd * state->derivative;
         double endpoint = correction >= 0.0 ? cfg->servo_right : cfg->servo_left;
@@ -207,6 +228,8 @@ track_control_output_t track_control_tick(track_control_state_t *state,
             fmax((double)cfg->servo_left, (double)cfg->servo_right));
         output.target_speed = (float)((double)cfg->speed_straight * (1.0 - severity) +
                                      (double)cfg->speed_curve_min * severity);
+        if (!state->frame_valid)
+            output.target_speed = cfg->speed_curve_min;
     }
     output.running = state->running;
     output.ready = track_ready(state, now_ms);

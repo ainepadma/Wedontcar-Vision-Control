@@ -311,7 +311,16 @@ static void test_loss(simulation_t *sim, uint8_t *image)
     memset(image, 0, (size_t)sim->rows * sim->cols);
     step(sim, image, 1U); /* 110 ms has no new image yet. */
     CHECK(sim->output.running);
-    step(sim, image, 1U); /* Invalid image at 120 ms stops in the same control tick. */
+    step(sim, image, 1U); /* First invalid image at 120 ms enters low-speed grace. */
+    CHECK(!sim->vision.valid && sim->output.running && !sim->output.ready);
+    CHECK(sim->control.lost_frames == 1U);
+    CHECK(sim->output.target_speed == sim->control.config.speed_curve_min);
+    step(sim, image, 1U);
+    step(sim, image, 1U); /* Second invalid image at 140 ms remains in grace. */
+    CHECK(sim->output.running && sim->control.lost_frames == 2U);
+    CHECK(sim->output.target_speed == sim->control.config.speed_curve_min);
+    step(sim, image, 1U);
+    step(sim, image, 1U); /* Third consecutive invalid image at 160 ms stops. */
     CHECK(!sim->vision.valid && !sim->output.running && !sim->output.ready);
     CHECK(sim->output.stop_reason == TRACK_STOP_LOST);
     CHECK(sim->output.target_speed == 0.0f && sim->button.enabled == 0U);
@@ -340,6 +349,38 @@ static void test_stale(simulation_t *sim, uint8_t *image)
     CHECK(sim->measured_left == 4.0f && sim->measured_right == 9.0f);
     CHECK(sim->control.ready_frames == 0U);
     check_three_new_frames_while_stopped(sim, image);
+}
+
+static void test_loss_stop_override(simulation_t *sim, uint8_t *image)
+{
+    draw_lane(image, sim->rows, sim->cols, 0);
+    prepare_running(sim, image);
+    const uint32_t old_pid_resets = sim->pid_resets;
+    track_control_set_loss_stop(&sim->control, 0U);
+    CHECK(sim->control.loss_stop_enabled == 0U);
+
+    memset(image, 0, (size_t)sim->rows * sim->cols);
+    step(sim, image, 1U);
+    step(sim, image, 1U);
+    CHECK(!sim->vision.valid && sim->output.running && !sim->output.ready);
+    CHECK(sim->output.stop_reason == TRACK_STOP_NONE);
+    CHECK(sim->output.target_speed == sim->control.config.speed_curve_min);
+    CHECK(sim->pwm_left > 0.0f && sim->pwm_right > 0.0f);
+    CHECK(sim->pid_resets == old_pid_resets);
+
+    /* With no further frames, stale protection is also bypassed, while the
+     * existing target, PID, encoder polarity and no-feedback guards continue. */
+    advance(sim, NULL, 1U, 20U);
+    CHECK(sim->output.running && !sim->output.ready);
+    CHECK(sim->pwm_left > 0.0f && sim->pwm_right > 0.0f);
+
+    track_control_set_loss_stop(&sim->control, 1U); /* Invalid current frame stops immediately. */
+    step(sim, NULL, 1U);
+    CHECK(!sim->output.running && sim->output.stop_reason == TRACK_STOP_LOST);
+    CHECK(sim->pid_resets == old_pid_resets + 1U);
+    CHECK(sim->pwm_left == 0.0f && sim->pwm_right == 0.0f);
+    check_pid_history_zero(&sim->pid_left);
+    check_pid_history_zero(&sim->pid_right);
 }
 
 static void test_press_before_ready(simulation_t *sim, const uint8_t *image)
@@ -497,6 +538,8 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     test_loss(&sim, image);
     simulation_init(&sim, rows, cols);
     test_stale(&sim, image);
+    simulation_init(&sim, rows, cols);
+    test_loss_stop_override(&sim, image);
     simulation_init(&sim, rows, cols);
     draw_lane(image, rows, cols, 0);
     test_press_before_ready(&sim, image);

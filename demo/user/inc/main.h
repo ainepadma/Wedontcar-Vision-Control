@@ -7,8 +7,11 @@
 #define SCREEN_TOGGLE_KEY C12
 // C13 / KEY_3 控制两个驱动电机；上电默认停止，按住上电不会启动。
 #define MOTOR_TOGGLE_KEY C13
+// C14 / KEY_2 切换丢线自动停机；上电默认开启，关闭不停止图像循迹。
+#define TRACK_LOSS_STOP_TOGGLE_KEY C14
 extern volatile uint8_t motor_enabled;
 extern volatile uint8_t motor_feedback_fault; // 1=左、2=右、3=两侧；原因见 track_stop_reason
+extern volatile uint8_t track_loss_stop_enabled;
 extern volatile uint8_t track_ready;
 extern volatile uint8_t track_stop_reason;
 extern volatile int16_t track_servo_tenths;
@@ -57,7 +60,7 @@ void track_frame_publish(const track_vision_result_t *result);
 // 舵机左右端点仍使用本车原配置；必须架空验证方向和机械限位后才能落地。
 #define TRACK_STEER_KP 0.020f
 #define TRACK_STEER_KD 0.0005f
-#define TRACK_SERVO_RATE_DEG_S 60.0f
+#define TRACK_SERVO_RATE_DEG_S 120.0f
 
 // 以下宏在初步测试例程时不可更改，后面若需更改舵机算法可以自行更改
 // ------------------ 舵机占空比计算方式 ------------------

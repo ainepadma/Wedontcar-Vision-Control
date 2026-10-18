@@ -81,14 +81,22 @@ static void synthetic(uint16_t rows, uint16_t cols)
     track_control_observe(&control, result.error, result.heading,
                           result.confidence, result.valid, 80U);
     output = track_control_tick(&control, 80U);
+    CHECK(output.running && output.target_speed == control.config.speed_curve_min);
+    track_control_observe(&control, result.error, result.heading,
+                          result.confidence, result.valid, 100U);
+    output = track_control_tick(&control, 100U);
+    CHECK(output.running && output.target_speed == control.config.speed_curve_min);
+    track_control_observe(&control, result.error, result.heading,
+                          result.confidence, result.valid, 120U);
+    output = track_control_tick(&control, 120U);
     CHECK(!output.running && output.target_speed == 0.0f);
     CHECK(output.stop_reason == TRACK_STOP_LOST);
     draw_gray_lane(rows, cols, 0);
     process(rows, cols);
-    for (uint32_t now = 100; now <= 140; now += 20)
+    for (uint32_t now = 140; now <= 180; now += 20)
         track_control_observe(&control, result.error, result.heading,
                               result.confidence, result.valid, now);
-    output = track_control_tick(&control, 140U);
+    output = track_control_tick(&control, 180U);
     CHECK(output.ready && !output.running && output.target_speed == 0.0f);
 
     for (int mode = 1; mode <= 3; ++mode) {

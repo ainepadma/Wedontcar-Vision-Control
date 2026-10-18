@@ -44,10 +44,12 @@ int16 encoder_data_3 = 0;
 int16 encoder_data_4 = 0;
 volatile uint8_t motor_enabled = 0;
 volatile uint8_t motor_feedback_fault = 0;
+volatile uint8_t track_loss_stop_enabled = 1;
 volatile uint8_t track_ready = 0;
 volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
 volatile int16_t track_servo_tenths = 0;
 static motor_switch_t motor_switch_state;
+static motor_switch_t track_loss_stop_switch_state;
 static motor_feedback_watchdog_t motor_feedback_watchdog;
 static track_control_state_t track_control;
 static volatile uint32_t control_clock_ms;
@@ -74,6 +76,8 @@ void track_runtime_init(void)
         .max_servo_rate_deg_s = TRACK_SERVO_RATE_DEG_S
     };
     track_control_init(&track_control, &config);
+    track_loss_stop_switch_state.enabled = 1U;
+    track_loss_stop_enabled = 1U;
     motor_feedback_watchdog_reset(&motor_feedback_watchdog);
     speed_target = 0.0f;
     motor_enabled = 0;
@@ -123,6 +127,14 @@ void PIT_IRQHandler(void)
         // 独立于图像主循环：30ms 去抖，长按不连发，上电按住不启动。
         uint8_t button_pressed = motor_switch_sample(&motor_switch_state,
                                                      gpio_get_level(MOTOR_TOGGLE_KEY) == GPIO_LOW);
+        uint8_t loss_stop_pressed = motor_switch_sample(&track_loss_stop_switch_state,
+            gpio_get_level(TRACK_LOSS_STOP_TOGGLE_KEY) == GPIO_LOW);
+        if (loss_stop_pressed)
+        {
+            track_control_set_loss_stop(&track_control,
+                                        track_loss_stop_switch_state.enabled);
+            track_loss_stop_enabled = track_control.loss_stop_enabled;
+        }
         if (button_pressed)
         {
             motor_feedback_fault = 0;

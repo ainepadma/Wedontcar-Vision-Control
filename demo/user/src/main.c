@@ -79,6 +79,7 @@ void Init()
     // C13 每 10ms 独立扫描，停机键不依赖摄像头或屏幕刷新。
     // 电机上电保持零输出，必须先松开按键再有效按下才启动。
     gpio_init(MOTOR_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
+    gpio_init(TRACK_LOSS_STOP_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     track_runtime_init();
     pit_ms_init(PIT_CH0, SPEED_CONTROL_PERIOD_MS);
 }
@@ -150,6 +151,7 @@ static void assistant_send_image(void)
     // LSPD/RSPD 为计数/10ms，TARGET10 为目标计数的10倍，LPWM/RPWM 为PWM指令。
     uint32_t primask = interrupt_global_disable();
     uint8_t snapshot_running = motor_enabled, snapshot_fault = motor_feedback_fault;
+    uint8_t snapshot_loss_stop = track_loss_stop_enabled;
     uint8_t snapshot_ready = track_ready, snapshot_stop = track_stop_reason;
     int16_t snapshot_servo = track_servo_tenths;
     float snapshot_target = speed_target;
@@ -157,11 +159,12 @@ static void assistant_send_image(void)
     float snapshot_left_pwm = speed_pwm_l, snapshot_right_pwm = speed_pwm_r;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.1.3 T=%lu CAP=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu SCREEN=%u MOTOR=%u MFAULT=%u EXP=%u STATUS=%u TRACK=%u Q=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu\r\n",
+        "#CAM FW=0.1.6 T=%lu CAP=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu SCREEN=%u MOTOR=%u MFAULT=%u LOSTSTOP=%u EXP=%u STATUS=%u TRACK=%u Q=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)processed_frames, (unsigned long)displayed_frames,
         (unsigned long)capture_fps, (unsigned long)process_fps, (unsigned long)display_fps,
         (unsigned int)screen_enabled, (unsigned int)snapshot_running, (unsigned int)snapshot_fault,
+        (unsigned int)snapshot_loss_stop,
         CAMERA_TUNING_EXPOSURE, (unsigned int)camera_exposure_status,
         (unsigned int)track_result.valid, (unsigned int)track_result.confidence,
         (int)track_result.error, (int)track_result.heading, (unsigned int)snapshot_ready,
@@ -241,8 +244,8 @@ static void update_frame_rates(uint32_t now)
 static void screen_draw_stats(void)
 {
     char line[17];
-    snprintf(line, sizeof(line), "CAP:%3lu P:%3lu", (unsigned long)MIN(capture_fps, 999U),
-             (unsigned long)MIN(process_fps, 999U));
+    snprintf(line, sizeof(line), "H:%5d S:%4d", (int)track_result.heading,
+             (int)track_servo_tenths);
     tft180_show_string(0, 102, line);
     snprintf(line, sizeof(line), "E:%5d Q:%3u ", (int)track_result.error,
              (unsigned int)track_result.confidence);
@@ -253,6 +256,8 @@ static void screen_draw_stats(void)
             ? "NO FB:%u      " : "ENC ERR:%u    ", (unsigned int)motor_feedback_fault);
         tft180_show_string(0, 134, line);
     }
+    else if (!track_loss_stop_enabled)
+        tft180_show_string(0, 134, motor_enabled ? "RUN LOST:OFF  " : "LOST STOP OFF ");
     else if (motor_enabled)
         tft180_show_string(0, 134, "TRACK RUN     ");
     else if (track_stop_reason == TRACK_STOP_LOST)
@@ -281,6 +286,7 @@ int main(void)
     interrupt_global_enable(0);
     camera_exposure_status = mt9v03x_set_exposure_time(CAMERA_TUNING_EXPOSURE);
     uint8_t displayed_motor_state = motor_enabled;
+    uint8_t displayed_loss_stop_state = track_loss_stop_enabled;
     uint32_t last_status_ms = 0;
     uint32_t last_processed_frame = 0;
 
@@ -297,6 +303,11 @@ int main(void)
         if (displayed_motor_state != motor_enabled)
         {
             displayed_motor_state = motor_enabled;
+            screen_stats_dirty = 1;
+        }
+        if (displayed_loss_stop_state != track_loss_stop_enabled)
+        {
+            displayed_loss_stop_state = track_loss_stop_enabled;
             screen_stats_dirty = 1;
         }
         //  mt9v03x摄像头

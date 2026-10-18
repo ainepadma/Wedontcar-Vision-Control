@@ -93,7 +93,18 @@ static void test_steering_and_speed(void)
     qualify(&state, 500, 0, 0U);
     track_control_toggle(&state, 40U);
     CHECK(track_control_tick(&state, 50U).servo_angle > config.servo_center);
-    puts("PASS semantic steering direction, endpoints, slew rate and curve slowdown");
+
+    /* On a bend, look-ahead heading must override a small opposite lateral
+     * offset; this is the measured curve-centre condition on the real car. */
+    track_control_init(&state, &config);
+    qualify(&state, -100, 400, 0U);
+    track_control_toggle(&state, 40U);
+    CHECK(track_control_tick(&state, 50U).servo_angle < config.servo_center);
+    track_control_init(&state, &config);
+    qualify(&state, 100, -400, 0U);
+    track_control_toggle(&state, 40U);
+    CHECK(track_control_tick(&state, 50U).servo_angle > config.servo_center);
+    puts("PASS semantic steering direction, heading-dominant bends, endpoints, slew rate and slowdown");
 }
 
 static void test_independent_servo_center(void)
@@ -169,7 +180,14 @@ static void test_loss_stale_and_encoder(void)
         qualify(&state, 0, 0, 0U);
         track_control_toggle(&state, 40U);
         if (reasons[i] == TRACK_STOP_LOST)
+        {
             track_control_observe(&state, 0, 0, 100U, 0U, 60U);
+            CHECK(state.running && state.lost_frames == 1U);
+            CHECK(track_control_tick(&state, 60U).target_speed == config.speed_curve_min);
+            track_control_observe(&state, 0, 0, 100U, 0U, 80U);
+            CHECK(state.running && state.lost_frames == 2U);
+            track_control_observe(&state, 0, 0, 100U, 0U, 100U);
+        }
         else if (reasons[i] == TRACK_STOP_STALE)
         {
             CHECK(track_control_tick(&state, 190U).running);
@@ -193,7 +211,7 @@ static void test_loss_stale_and_encoder(void)
     track_control_toggle(&state, 40U);
     track_control_observe(&state, 0, 0, 100U, 1U, 200U);
     CHECK(!state.running && state.stop_reason == TRACK_STOP_STALE && state.ready_frames == 1U);
-    puts("PASS lost/stale/reverse/no-feedback latches, exact stale boundary, recovery needs toggle");
+    puts("PASS 3-frame lost grace, stale/reverse/no-feedback latches, recovery needs toggle");
 }
 
 static void test_default_speed_profile(void)
@@ -222,6 +240,48 @@ static void test_default_speed_profile(void)
     output = track_control_tick(&state, 410U);
     CHECK(!output.running && output.target_speed == 0.0f);
     puts("PASS shared production speed defaults 30/20, bounds and stopped zero target");
+}
+
+static void test_loss_stop_switch(void)
+{
+    track_control_state_t state;
+    track_control_output_t output;
+    track_control_init(&state, &config);
+    CHECK(state.loss_stop_enabled == 1U);
+
+    /* The override cannot start a car that never saw a valid track. */
+    track_control_set_loss_stop(&state, 0U);
+    track_control_toggle(&state, 0U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_NOT_READY);
+
+    qualify(&state, 300, 100, 20U);
+    track_control_toggle(&state, 60U);
+    CHECK(state.running);
+    track_control_observe(&state, 0, 0, 0U, 0U, 80U);
+    output = track_control_tick(&state, 80U);
+    CHECK(output.running && !output.ready);
+    CHECK(output.stop_reason == TRACK_STOP_NONE && output.target_speed > 0.0f);
+    CHECK(state.loss_stop_enabled == 0U);
+
+    /* Camera loss and staleness no longer stop, but observations still run. */
+    output = track_control_tick(&state, 400U);
+    CHECK(output.running && !output.ready && output.target_speed > 0.0f);
+    qualify(&state, -200, -100, 420U);
+    output = track_control_tick(&state, 460U);
+    CHECK(output.running && output.ready);
+
+    /* Re-enabling the protection while the current image is invalid stops on
+     * the next control tick; it never auto-restarts. */
+    track_control_observe(&state, 0, 0, 0U, 0U, 480U);
+    CHECK(state.running);
+    track_control_set_loss_stop(&state, 1U);
+    output = track_control_tick(&state, 480U);
+    CHECK(!output.running && !output.ready);
+    CHECK(output.stop_reason == TRACK_STOP_LOST);
+    CHECK(state.loss_stop_enabled == 1U);
+
+    track_control_set_loss_stop(NULL, 0U);
+    puts("PASS C14 loss-stop override keeps detection/control active and never bypasses start gate");
 }
 
 static void test_timing_and_pd(void)
@@ -259,6 +319,10 @@ static void test_timing_and_pd(void)
     track_control_observe(&state, -600, 0, 60U, 1U, 120U);
     CHECK(state.derivative == 0.0f);
     track_control_observe(&state, -600, 0, 59U, 1U, 140U);
+    CHECK(state.running && state.lost_frames == 1U);
+    track_control_observe(&state, -600, 0, 59U, 1U, 160U);
+    CHECK(state.running && state.lost_frames == 2U);
+    track_control_observe(&state, -600, 0, 59U, 1U, 180U);
     CHECK(!state.running && state.stop_reason == TRACK_STOP_LOST);
     puts("PASS uint32 wrap, actual-frame-dt filtered derivative, old/duplicate frames");
 }
@@ -295,7 +359,9 @@ static void test_randomized_invariants(void)
         CHECK(output.servo_angle >= 85.0f && output.servo_angle <= 100.0f);
         CHECK(fabsf(output.servo_angle - previous_angle) <= 0.60001f);
         CHECK(state.ready_frames <= 3U);
-        CHECK(!output.running || output.ready);
+        CHECK(!output.running || state.frame_valid ||
+              !state.loss_stop_enabled ||
+              (state.lost_frames > 0U && state.lost_frames < 3U));
         CHECK(!output.running || (output.target_speed >= 10.0f && output.target_speed <= 20.0f));
         CHECK(previously_running || toggled || !output.running);
     }
@@ -345,6 +411,7 @@ int main(void)
     test_independent_servo_center();
     test_loss_stale_and_encoder();
     test_default_speed_profile();
+    test_loss_stop_switch();
     test_timing_and_pd();
     test_abnormal_inputs();
     test_randomized_invariants();
