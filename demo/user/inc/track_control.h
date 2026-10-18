@@ -5,8 +5,8 @@
 
 /* Shared by firmware and host defaults; encoder counts per 10-ms tick.
  * First loaded-running tune, not a calibrated physical speed specification. */
-#define TRACK_SPEED_STRAIGHT 30.0f
-#define TRACK_SPEED_CURVE_MIN 20.0f
+#define TRACK_SPEED_STRAIGHT 60.0f
+#define TRACK_SPEED_CURVE_MIN 40.0f
 
 typedef enum
 {

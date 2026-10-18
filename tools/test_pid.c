@@ -58,7 +58,7 @@ static void test_power_on_and_independent_wheels(void)
     near_value(speed_pid_l.imax, 5000.0f);
     near_value(speed_pid_r.imax, 5000.0f);
     near_value(speed_pid_l.outmin, 0.0f);
-    near_value(speed_pid_r.outmax, 5000.0f);
+    near_value(speed_pid_r.outmax, 2000.0f);
     near_value(speed_real_l, 0.0f);
     near_value(speed_real_r, 0.0f);
     near_value(speed_pwm_l, 0.0f);
@@ -135,7 +135,7 @@ static void test_p_only_matches_existing_drive(void)
     pid.ki = 0.0f; /* Preserve the former P-only law as an explicit algorithm regression. */
     for (error = -200; error <= 200; ++error)
     {
-        float expected = constrain_float(50.0f * (float)error, 0.0f, 5000.0f);
+        float expected = constrain_float(50.0f * (float)error, 0.0f, 2000.0f);
         near_value(PidLocCtrl(&pid, (float)error, 1.0f), expected);
         near_value(pid.integrator, 0.0f);
     }
@@ -152,24 +152,24 @@ static void test_production_traction_pi(void)
     float previous_output;
     My_Pid_Init();
     /* Use the real production initializer, not test-only substitute gains.
-     * Straight/curve targets are 30/20 counts per 10-ms sample. */
+     * Straight/curve targets are 60/40 counts per 10-ms sample. */
     near_value(speed_pid_l.kp, 50.0f);
     near_value(speed_pid_l.ki, 0.2f);
     near_value(speed_pid_l.kd, 0.0f);
     near_value(speed_pid_l.imax, 5000.0f);
     near_value(speed_pid_l.outmin, 0.0f);
-    near_value(speed_pid_l.outmax, 5000.0f);
-    near_value(PidLocCtrl(&speed_pid_l, 30.0f, 1.0f), 1506.0f);
-    near_value(PidLocCtrl(&speed_pid_r, 20.0f, 1.0f), 1004.0f);
-    near_value(speed_pid_l.integrator, 30.0f);
-    near_value(speed_pid_r.integrator, 20.0f);
-    near_value(PidLocCtrl(&speed_pid_l, 2.0f, 1.0f), 106.4f);
-    near_value(speed_pid_r.out, 1004.0f);
-    near_value(speed_pid_r.integrator, 20.0f);
+    near_value(speed_pid_l.outmax, 2000.0f);
+    near_value(PidLocCtrl(&speed_pid_l, 60.0f, 1.0f), 2000.0f);
+    near_value(PidLocCtrl(&speed_pid_r, 40.0f, 1.0f), 2000.0f);
+    near_value(speed_pid_l.integrator, 0.0f);
+    near_value(speed_pid_r.integrator, 0.0f);
+    near_value(PidLocCtrl(&speed_pid_l, 2.0f, 1.0f), 100.4f);
+    near_value(speed_pid_r.out, 2000.0f);
+    near_value(speed_pid_r.integrator, 0.0f);
     Pid_Reset(&speed_pid_l);
     reset_state_is_zero(&speed_pid_l);
     near_value(speed_pid_l.ki, 0.2f);
-    near_value(speed_pid_r.out, 1004.0f);
+    near_value(speed_pid_r.out, 2000.0f);
 
     /* A small sustained tracking error builds bounded load compensation. */
     previous_output = 0.0f;
@@ -196,7 +196,7 @@ static void test_production_traction_pi(void)
     near_value(speed_pid_l.kp, 50.0f);
     near_value(speed_pid_l.ki, 0.2f);
     near_value(PidLocCtrl(&speed_pid_l, 0.0f, 1.0f), 0.0f);
-    near_value(speed_pid_r.out, 1004.0f);
+    near_value(speed_pid_r.out, 2000.0f);
 }
 
 static void test_large_pure_integral_step_reaches_boundary(void)

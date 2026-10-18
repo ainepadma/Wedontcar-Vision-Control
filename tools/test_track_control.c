@@ -218,28 +218,28 @@ static void test_default_speed_profile(void)
 {
     track_control_state_t state;
     track_control_init(&state, NULL);
-    CHECK(TRACK_SPEED_STRAIGHT == 30.0f && TRACK_SPEED_CURVE_MIN == 20.0f);
+    CHECK(TRACK_SPEED_STRAIGHT == 60.0f && TRACK_SPEED_CURVE_MIN == 40.0f);
     CHECK(state.config.speed_straight == TRACK_SPEED_STRAIGHT);
     CHECK(state.config.speed_curve_min == TRACK_SPEED_CURVE_MIN);
     qualify(&state, 0, 0, 0U);
     track_control_toggle(&state, 40U);
     track_control_output_t output = track_control_tick(&state, 50U);
-    CHECK(output.running && output.target_speed == 30.0f);
+    CHECK(output.running && output.target_speed == 60.0f);
     track_control_init(&state, NULL);
     qualify(&state, 1000, 0, 0U);
     track_control_toggle(&state, 40U);
     output = track_control_tick(&state, 50U);
-    CHECK(output.running && output.target_speed == 20.0f);
+    CHECK(output.running && output.target_speed == 40.0f);
     for (uint32_t now = 60U; now <= 400U; now += 10U)
     {
         track_control_observe(&state, 0, 0, 100U, 1U, now);
         output = track_control_tick(&state, now);
-        CHECK(output.running && output.target_speed >= 20.0f && output.target_speed <= 30.0f);
+        CHECK(output.running && output.target_speed >= 40.0f && output.target_speed <= 60.0f);
     }
     track_control_toggle(&state, 400U);
     output = track_control_tick(&state, 410U);
     CHECK(!output.running && output.target_speed == 0.0f);
-    puts("PASS shared production speed defaults 30/20, bounds and stopped zero target");
+    puts("PASS shared production speed defaults 60/40, bounds and stopped zero target");
 }
 
 static void test_loss_stop_switch(void)

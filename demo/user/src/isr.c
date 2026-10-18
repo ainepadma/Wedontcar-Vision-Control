@@ -198,13 +198,13 @@ void PIT_IRQHandler(void)
             // t=1 表示一个 10ms 采样周期，不是 1 秒；P=50、I=0.2、D=0。
             speed_pwm_l = PidLocCtrl(&speed_pid_l, target_counts - speed_real_l, 1.f);
             // 最终驱动防线仍保留非负/硬件满量程限制，并同步内部输出状态。
-            speed_pwm_l = constrain_float(speed_pwm_l, 0.0f, (float)PWM_DUTY_MAX);
+            speed_pwm_l = constrain_float(speed_pwm_l, 0.0f, speed_OUTMAX);
             speed_pid_l.out = speed_pwm_l;
             gpio_set_level(MOTOR1_DIR, MOTOR1_FORWARD_DIR_LEVEL);
             pwm_set_duty(MOTOR1_PWM, (uint32_t)speed_pwm_l);
 
             speed_pwm_r = PidLocCtrl(&speed_pid_r, target_counts - speed_real_r, 1.f);
-            speed_pwm_r = constrain_float(speed_pwm_r, 0.0f, (float)PWM_DUTY_MAX);
+            speed_pwm_r = constrain_float(speed_pwm_r, 0.0f, speed_OUTMAX);
             speed_pid_r.out = speed_pwm_r;
             gpio_set_level(MOTOR2_DIR, MOTOR2_FORWARD_DIR_LEVEL);
             pwm_set_duty(MOTOR2_PWM, (uint32_t)speed_pwm_r);

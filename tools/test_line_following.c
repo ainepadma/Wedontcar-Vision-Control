@@ -567,25 +567,26 @@ static void test_production_pi_tuning(void)
 {
     My_Pid_Init();
     CHECK(speed_KP == 50.0f && speed_KI == 0.2f && speed_KD == 0.0f);
-    CHECK(speed_IMAX == 5000.0f && speed_OUTMAX == 5000.0f);
+    CHECK(speed_IMAX == 5000.0f && speed_OUTMAX == 2000.0f);
     CHECK(speed_pid_l.kp == speed_KP && speed_pid_r.kp == speed_KP);
     CHECK(speed_pid_l.ki == speed_KI && speed_pid_r.ki == speed_KI);
     CHECK(speed_pid_l.outmin == 0.0f && speed_pid_r.outmin == 0.0f);
-    CHECK(speed_pid_l.outmax == 5000.0f && speed_pid_r.outmax == 5000.0f);
+    CHECK(speed_pid_l.outmax == 2000.0f && speed_pid_r.outmax == 2000.0f);
     CHECK(speed_target == 0.0f && speed_pwm_l == 0.0f && speed_pwm_r == 0.0f);
     float previous = 0.0f;
     for (unsigned int tick = 1U; tick <= 50U; ++tick)
     {
         const float output = PidLocCtrl(&speed_pid_l, TRACK_SPEED_STRAIGHT, 1.0f);
-        CHECK(output > previous && output <= 5000.0f);
+        CHECK(output == 2000.0f);
+        CHECK(speed_pid_l.integrator == 0.0f);
         CHECK(speed_pid_l.out_i <= 1000.0f);
         previous = output;
         check_pid_history_zero(&speed_pid_r);
     }
-    CHECK(fabsf(previous - 1800.0f) < 0.01f); /* 1500 P + 300 I after 500 ms. */
+    CHECK(fabsf(previous - 2000.0f) < 0.01f); /* Hard 20% PWM ceiling. */
     Pid_Reset(&speed_pid_l);
     check_pid_history_zero(&speed_pid_l);
-    CHECK(speed_pid_l.ki == 0.2f && speed_pid_l.outmax == 5000.0f);
+    CHECK(speed_pid_l.ki == 0.2f && speed_pid_l.outmax == 2000.0f);
     puts("PASS actual firmware PI defaults, bounded load compensation, independent state/reset");
 }
 

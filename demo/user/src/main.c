@@ -159,7 +159,7 @@ static void assistant_send_image(void)
     float snapshot_left_pwm = speed_pwm_l, snapshot_right_pwm = speed_pwm_r;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.1.6 T=%lu CAP=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu SCREEN=%u MOTOR=%u MFAULT=%u LOSTSTOP=%u EXP=%u STATUS=%u TRACK=%u Q=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu\r\n",
+        "#CAM FW=0.1.7 T=%lu CAP=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu SCREEN=%u MOTOR=%u MFAULT=%u LOSTSTOP=%u EXP=%u STATUS=%u TRACK=%u Q=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)processed_frames, (unsigned long)displayed_frames,
         (unsigned long)capture_fps, (unsigned long)process_fps, (unsigned long)display_fps,
