@@ -3,5 +3,16 @@
 .dist/
 .reference/
 
+# Keil build output and per-user workspace state
+Objects/
+Listings/
+*.uvguix.*
+*.o
+*.d
+
+# IAR generated dependency and debugger session state
+*.dep
+demo/iar/program/settings/
+
 # OS
 

@@ -32,7 +32,7 @@ void get_hist_gram(unsigned char* _img,
 				   const unsigned short _cols, 
 				   short* _hist_gram)
 {
-	memset(_hist_gram, 0, 256);
+	memset(_hist_gram, 0, 256 * sizeof(*_hist_gram));
     for (unsigned short _i = 0; _i < _rows; ++_i)
     {
         for (unsigned short _j = 0; _j < _cols; ++_j)
