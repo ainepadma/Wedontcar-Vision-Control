@@ -29,9 +29,70 @@ static void check_output(track_control_output_t output)
 {
     CHECK(isfinite(output.servo_angle));
     CHECK(isfinite(output.target_speed));
+    CHECK(isfinite(output.target_speed_left));
+    CHECK(isfinite(output.target_speed_right));
     CHECK(output.target_speed >= 0.0f);
+    CHECK(output.target_speed_left >= 0.0f);
+    CHECK(output.target_speed_right >= 0.0f);
     if (!output.running)
+    {
         CHECK(output.target_speed == 0.0f);
+        CHECK(output.target_speed_left == 0.0f);
+        CHECK(output.target_speed_right == 0.0f);
+    }
+}
+
+static void test_wheel_speed_differential(void)
+{
+    track_control_state_t state;
+    track_control_init(&state, &config);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+    track_control_output_t output = track_control_tick(&state, 50U);
+    CHECK(output.target_speed_left == output.target_speed);
+    CHECK(output.target_speed_right == output.target_speed);
+
+    state.config.max_servo_rate_deg_s = 0.0f;
+    state.servo_angle = config.servo_right;
+    output = track_control_tick(&state, 60U);
+    CHECK(fabsf(output.target_speed_left - output.target_speed * 1.10f) < 0.0001f);
+    CHECK(fabsf(output.target_speed_right - output.target_speed * 0.90f) < 0.0001f);
+
+    state.servo_angle = config.servo_left;
+    output = track_control_tick(&state, 70U);
+    CHECK(fabsf(output.target_speed_left - output.target_speed * 0.90f) < 0.0001f);
+    CHECK(fabsf(output.target_speed_right - output.target_speed * 1.10f) < 0.0001f);
+    puts("PASS centered and symmetric +/-10% wheel-speed differential");
+}
+
+static void test_ring_turn_override(void)
+{
+    track_control_state_t state;
+    track_control_init(&state, &config);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+
+    track_control_set_turn_override(&state, 1);
+    track_control_output_t output = track_control_tick(&state, 50U);
+    CHECK(output.running && output.servo_angle > config.servo_center);
+    CHECK(output.target_speed == config.speed_curve_min);
+    CHECK(output.target_speed_left < output.target_speed_right);
+
+    state.servo_angle = config.servo_center;
+    track_control_set_turn_override(&state, -1);
+    output = track_control_tick(&state, 60U);
+    CHECK(output.servo_angle < config.servo_center);
+    CHECK(output.target_speed_left > output.target_speed_right);
+
+    track_control_set_turn_override(&state, 0);
+    output = track_control_tick(&state, 70U);
+    CHECK(output.servo_angle > config.servo_right);
+    track_control_set_turn_override(&state, 100);
+    CHECK(state.turn_override == 1);
+    track_control_set_turn_override(&state, -100);
+    CHECK(state.turn_override == -1);
+    track_control_set_turn_override(NULL, 1);
+    puts("PASS ring direction overrides steering with existing limits/differential");
 }
 
 static void test_readiness(void)
@@ -511,6 +572,8 @@ static void test_abnormal_inputs(void)
 int main(void)
 {
     test_readiness();
+    test_wheel_speed_differential();
+    test_ring_turn_override();
     test_steering_and_speed();
     test_independent_servo_center();
     test_loss_stale_and_encoder();

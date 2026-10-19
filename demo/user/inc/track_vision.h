@@ -5,9 +5,9 @@
 
 #define TRACK_VISION_MAX_ROWS 480
 #define TRACK_VISION_MAX_COLS 752
-// 当前相机安装已确认车体从约 70%H 开始侵入画面；留出 2%H 标定余量，
-// 只处理车体上方的可见赛道，不在固定遮挡区内猜测或补画赛道。
-#define TRACK_VISION_ROI_START_PERCENT 40U
+// 控制中线覆盖图像纵向 [20%H, 68%H)：避开过远端的不稳定区域，
+// 同时保持此前确认的车体遮挡上边界。
+#define TRACK_VISION_ROI_START_PERCENT 20U
 #define TRACK_VISION_ROI_END_PERCENT 68U
 
 typedef enum track_vision_reject_t
@@ -48,7 +48,8 @@ typedef struct track_vision_result_t
 
 /*
  * 白轨黑底二值图，非零像素视为白色，输入图像不会被修改。
- * 仅跟踪 [40%H, 68%H) 行，排除底部固定车体区域，从近到远选择相连白色区域。
+ * 仅跟踪 [20%H, 68%H) 行，排除过远端和下部固定车体区域，
+ * 从近到远选择相连白色区域。
  * 保守限制：仅补偿不超过 2 像素的黑缝；白色宽度须在约 6.25%W
  * 至 80%W 之间，且左右边界都可见。单边出画、全白、窄亮点以及
  * 无法确定唯一连续分支的行不补线、不推测中线。不能代替岔路决策。

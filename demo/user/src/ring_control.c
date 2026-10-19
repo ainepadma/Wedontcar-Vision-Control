@@ -92,7 +92,11 @@ void ring_control_tick(ring_control_state_t *state, uint8_t vehicle_running,
     }
     if (state->phase == RING_STATE_COOLDOWN)
     {
-        if ((int32_t)(now_ms - state->cooldown_until_ms) >= 0)
+        /* A persistent false visual shape must not re-arm every few frames.
+         * Re-arm only after both the cooldown elapsed and that shape left the
+         * camera view. */
+        if ((int32_t)(now_ms - state->cooldown_until_ms) >= 0 &&
+            !state->vision_candidate)
             ring_reset_detection(state);
         state->last_tick_ms = now_ms;
         return;
@@ -107,6 +111,20 @@ void ring_control_tick(ring_control_state_t *state, uint8_t vehicle_running,
     {
         if ((uint32_t)(now_ms - state->phase_started_ms) >
             RING_APPROACH_TIMEOUT_MS)
+        {
+            state->phase = RING_STATE_COOLDOWN;
+            state->cooldown_until_ms = now_ms + RING_COOLDOWN_MS;
+            state->candidate_frames = 0U;
+            state->clear_frames = 0U;
+            state->yaw_motion_ticks = 0U;
+            return;
+        }
+        /* A visual candidate may be a transient widening or crossing.  Until
+         * the IMU has seen a sustained turn, a few clear track frames are
+         * enough to revoke it instead of leaving the red indicator latched
+         * for the full approach timeout. */
+        if (state->clear_frames >= RING_ENTER_CLEAR_FRAMES &&
+            state->yaw_motion_ticks == 0U)
         {
             ring_reset_detection(state);
             return;
@@ -161,4 +179,11 @@ void ring_control_tick(ring_control_state_t *state, uint8_t vehicle_running,
             state->cooldown_until_ms = now_ms + RING_COOLDOWN_MS;
         }
     }
+}
+
+int8_t ring_control_turn_override(const ring_control_state_t *state)
+{
+    if (state == NULL || state->phase != RING_STATE_INSIDE)
+        return 0;
+    return state->direction > 0 ? 1 : (state->direction < 0 ? -1 : 0);
 }

@@ -5,6 +5,7 @@
 
 #define RING_CONFIRM_FRAMES 3U
 #define RING_CLEAR_FRAMES 3U
+#define RING_ENTER_CLEAR_FRAMES 5U
 #define RING_YAW_START_DPS 12.0f
 #define RING_MIN_EXIT_DEG 200.0f
 #define RING_APPROACH_TIMEOUT_MS 1500U
@@ -44,5 +45,8 @@ void ring_control_observe(ring_control_state_t *state, uint8_t candidate,
 void ring_control_tick(ring_control_state_t *state, uint8_t vehicle_running,
                        uint8_t yaw_ready, float yaw_rate_dps,
                        uint32_t now_ms);
+/* Keep normal centerline steering through CANDIDATE/ENTERING.  The ring may
+ * override steering only after sustained IMU yaw confirms physical entry. */
+int8_t ring_control_turn_override(const ring_control_state_t *state);
 
 #endif

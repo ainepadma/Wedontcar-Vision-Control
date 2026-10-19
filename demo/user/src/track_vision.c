@@ -79,8 +79,8 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
         uint16_t best_right = 0;
         uint16_t best_center = 0;
         uint16_t best_distance = UINT16_MAX;
-        uint16_t second_distance = UINT16_MAX;
         uint16_t candidates = 0;
+        uint16_t connected_shapes = 0;
         uint16_t shape_candidates = 0;
         uint16_t x = 0;
         while (x < cols)
@@ -127,30 +127,35 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
                 const uint16_t minimum_overlap = track_max(3U,
                     track_min(width, previous_right - previous_left + 1U) / 4U);
                 distance = track_distance(center, previous_center);
-                if (distance > (uint32_t)jump_per_row * row_gap ||
-                    overlap_right < overlap_left ||
+                if (overlap_right < overlap_left ||
                     overlap_right - overlap_left + 1U < minimum_overlap)
                 {
                     continue;
                 }
+                ++connected_shapes;
+                if (distance > (uint32_t)jump_per_row * row_gap)
+                    continue;
             }
 
             ++candidates;
             if (distance < best_distance)
             {
-                second_distance = best_distance;
                 best_distance = distance;
                 best_left = start;
                 best_right = end;
                 best_center = center;
             }
-            else if (distance < second_distance)
-            {
-                second_distance = distance;
-            }
         }
 
-        // 起始行必须唯一；追踪时近似等距的多个候选视为岔路歧义。
+        // 两个白色区域只要都与上一行赛道充分重叠，就已经构成分叉；
+        // 即使两支中心跳变超过普通弯道上限，也禁止误选其中一支继续追踪。
+        if (have_previous && connected_shapes > 1U)
+        {
+            ++out->ambiguous_rows;
+            continue;
+        }
+
+        // 起始行必须唯一；通过普通弯道连续性检查后仍有多个候选也视为分叉。
         if (candidates == 0U)
         {
             ++out->no_candidate_rows;
@@ -158,8 +163,7 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
                 ++out->disconnected_rows;
             continue;
         }
-        if ((!have_previous && candidates != 1U) ||
-            (candidates > 1U && second_distance - best_distance <= jump_per_row))
+        if ((!have_previous && candidates != 1U) || candidates > 1U)
         {
             ++out->ambiguous_rows;
             continue;

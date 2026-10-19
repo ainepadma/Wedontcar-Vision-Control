@@ -223,6 +223,22 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && abs(result->error) <= 10);
 
+    // An asymmetric fork must stop the centerline instead of selecting the
+    // slightly nearer branch. Both arms still overlap the established lane.
+    draw_lane(image, rows, cols, 0, 0);
+    const uint16_t fork_row = roi_start + roi_rows / 2U;
+    for (uint16_t y = roi_start; y < fork_row; ++y)
+    {
+        memset(image + (uint32_t)y * cols, 0, cols);
+        memset(image + (uint32_t)y * cols + cols / 4U, 255, cols / 5U);
+        memset(image + (uint32_t)y * cols + cols * 11U / 20U,
+               255, cols * 11U / 50U);
+    }
+    verify(image, rows, cols, &guarded);
+    CHECK(result->ambiguous_rows > 0U);
+    for (uint16_t y = roi_start; y < fork_row; ++y)
+        CHECK(!result->row_valid[y]);
+
     // Missing far/near thirds invalidate output even if 2/3 of ROI remains.
     draw_lane(image, rows, cols, 0, 0);
     memset(image + (uint32_t)roi_start * cols, 0, (size_t)zone_rows * cols);

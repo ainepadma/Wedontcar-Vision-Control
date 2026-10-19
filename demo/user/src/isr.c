@@ -254,26 +254,34 @@ void PIT_IRQHandler(void)
             track_control_stop(&track_control, TRACK_STOP_OVERSPEED);
         }
 
+        ring_control_tick(&ring_control, track_control.running,
+                          imu_navigation.bias_ready,
+                          imu_navigation.yaw_rate_dps,
+                          control_clock_ms);
+        /* A visual candidate must not pull the car off the white centerline.
+         * Normal vision steering remains active until IMU yaw confirms that
+         * the chassis has physically entered the ring. */
+        track_control_set_turn_override(&track_control,
+            ring_control_turn_override(&ring_control));
         track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
         motor_enabled = output.running;
         motor_switch_state.enabled = output.running;
         track_ready = output.ready;
         track_stop_reason = output.stop_reason;
-        ring_control_tick(&ring_control, output.running,
-                          imu_navigation.bias_ready,
-                          imu_navigation.yaw_rate_dps,
-                          control_clock_ms);
 #if SERVO_CENTER_TEST_MODE
         track_servo_tenths = (int16_t)(servo_center_test_angle * 10.0f);
 #else
         track_servo_tenths = (int16_t)(output.servo_angle * 10.0f);
 #endif
-        const float target_counts =
+        const float speed_scale =
 #if SERVO_CENTER_TEST_MODE
             0.0f;
 #else
-            output.target_speed * (speed_full_enabled ? TRACK_SPEED_FULL_SCALE : 1.0f);
+            (speed_full_enabled ? TRACK_SPEED_FULL_SCALE : 1.0f);
 #endif
+        const float target_counts = output.target_speed * speed_scale;
+        const float target_counts_l = output.target_speed_left * speed_scale;
+        const float target_counts_r = output.target_speed_right * speed_scale;
         speed_target = target_counts;
         if (button_pressed || was_running != motor_enabled)
         {
@@ -303,14 +311,14 @@ void PIT_IRQHandler(void)
             pwm_set_duty(SERVO_MOTOR_PWM, SERVO_MOTOR_DUTY(output.servo_angle));
             // 保留已实测极性与曲率降速关系；有界 PI 增加低速负载补偿。
             // t=1 表示一个 10ms 采样周期，不是 1 秒；P=50、I=0.2、D=0。
-            speed_pwm_l = PidLocCtrl(&speed_pid_l, target_counts - speed_real_l, 1.f);
+            speed_pwm_l = PidLocCtrl(&speed_pid_l, target_counts_l - speed_real_l, 1.f);
             // 最终驱动防线仍保留非负/硬件满量程限制，并同步内部输出状态。
             speed_pwm_l = constrain_float(speed_pwm_l, 0.0f, speed_OUTMAX);
             speed_pid_l.out = speed_pwm_l;
             gpio_set_level(MOTOR1_DIR, MOTOR1_FORWARD_DIR_LEVEL);
             pwm_set_duty(MOTOR1_PWM, (uint32_t)speed_pwm_l);
 
-            speed_pwm_r = PidLocCtrl(&speed_pid_r, target_counts - speed_real_r, 1.f);
+            speed_pwm_r = PidLocCtrl(&speed_pid_r, target_counts_r - speed_real_r, 1.f);
             speed_pwm_r = constrain_float(speed_pwm_r, 0.0f, speed_OUTMAX);
             speed_pid_r.out = speed_pwm_r;
             gpio_set_level(MOTOR2_DIR, MOTOR2_FORWARD_DIR_LEVEL);
