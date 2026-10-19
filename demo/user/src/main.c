@@ -83,7 +83,6 @@ void Init()
     // C13 每 10ms 独立扫描，停机键不依赖摄像头或屏幕刷新。
     // 电机上电保持零输出，必须先松开按键再有效按下才启动。
     gpio_init(MOTOR_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
-    gpio_init(PROTECTION_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     gpio_init(SPEED_MODE_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     track_runtime_init();
     pit_ms_init(PIT_CH0, SPEED_CONTROL_PERIOD_MS);
@@ -338,24 +337,19 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 118, line);
     if (motor_feedback_fault)
     {
-        const char *fault_format = track_stop_reason == TRACK_STOP_NO_FEEDBACK
-            ? "NO FB:%u      " : (track_stop_reason == TRACK_STOP_OVERSPEED
-            ? "AIR/FAST:%u   " : "ENC ERR:%u    ");
-        snprintf(line, sizeof(line), fault_format, (unsigned int)motor_feedback_fault);
+        snprintf(line, sizeof(line), "ENC WARN:%u    ",
+                 (unsigned int)motor_feedback_fault);
         tft180_show_string(0, 134, line);
     }
-    else if (!protection_enabled)
-        tft180_show_string(0, 134, motor_enabled
-            ? (speed_full_enabled ? "FREE FULL     " : "FREE LOW      ")
-            : "C13 FREE RUN  ");
+    else if (motor_enabled && !track_ready)
+        tft180_show_string(0, 134, "CAM WARN      ");
+    else if (motor_enabled && (!imu_navigation.device_ready ||
+                               !imu_navigation.bias_ready))
+        tft180_show_string(0, 134, "IMU WARN      ");
     else if (motor_enabled)
-        tft180_show_string(0, 134, speed_full_enabled ? "TRACK FULL    " : "TRACK LOW     ");
-    else if (track_stop_reason == TRACK_STOP_LOST)
-        tft180_show_string(0, 134, "TRACK LOST    ");
-    else if (track_stop_reason == TRACK_STOP_STALE)
-        tft180_show_string(0, 134, "CAM TIMEOUT   ");
+        tft180_show_string(0, 134, speed_full_enabled ? "RUN FULL      " : "RUN LOW       ");
     else
-        tft180_show_string(0, 134, track_ready ? "READY C13:GO  " : "WAIT TRACK    ");
+        tft180_show_string(0, 134, "C13 START     ");
 #endif
     screen_stats_dirty = 0;
 }

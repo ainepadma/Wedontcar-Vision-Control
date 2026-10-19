@@ -45,7 +45,7 @@ int16 encoder_data_3 = 0;
 int16 encoder_data_4 = 0;
 volatile uint8_t motor_enabled = 0;
 volatile uint8_t motor_feedback_fault = 0;
-volatile uint8_t protection_enabled = 1;
+volatile uint8_t protection_enabled = 0;
 volatile uint8_t speed_full_enabled = 0;
 volatile uint8_t track_ready = 0;
 volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
@@ -54,14 +54,11 @@ volatile uint8_t imu_device_status = IMU660RB_RESULT_ERROR;
 imu_navigation_state_t imu_navigation;
 ring_control_state_t ring_control;
 static motor_switch_t motor_switch_state;
-static motor_switch_t protection_switch_state;
 static motor_switch_t speed_mode_switch_state;
 #if SERVO_CENTER_TEST_MODE
 static motor_switch_t servo_decrease_switch_state;
 static float servo_center_test_angle = SERVO_MOTOR_CENTER;
 #endif
-static motor_feedback_watchdog_t motor_feedback_watchdog;
-static motor_overspeed_watchdog_t motor_overspeed_watchdog;
 static track_control_state_t track_control;
 static volatile uint32_t control_clock_ms;
 static uint32_t consumed_frame_generation;
@@ -89,18 +86,11 @@ void track_runtime_init(void)
     };
     track_control_init(&track_control, &config);
     ring_control_init(&ring_control);
-    protection_switch_state.enabled = 1U;
     speed_mode_switch_state.enabled = 0U;
-    protection_enabled = 1U;
-    speed_full_enabled = 0U;
-#if SERVO_CENTER_TEST_MODE
-    // 中值测试不依赖赛道就绪；C13 只用于开关舵机输出。
+    // 只由 C13 启停：图像/IMU/编码器异常仅供诊断，不触发自动停车。
     track_control_set_loss_stop(&track_control, 0U);
-    protection_switch_state.enabled = 0U;
     protection_enabled = 0U;
-#endif
-    motor_feedback_watchdog_reset(&motor_feedback_watchdog);
-    motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
+    speed_full_enabled = 0U;
     speed_target = 0.0f;
     motor_enabled = 0;
     track_servo_tenths = (int16_t)(track_control.servo_angle * 10.0f);
@@ -170,8 +160,6 @@ void PIT_IRQHandler(void)
         // 独立于图像主循环：30ms 去抖，长按不连发，上电按住不启动。
         uint8_t button_pressed = motor_switch_sample(&motor_switch_state,
                                                      gpio_get_level(MOTOR_TOGGLE_KEY) == GPIO_LOW);
-        uint8_t protection_pressed = motor_switch_sample(&protection_switch_state,
-            gpio_get_level(PROTECTION_TOGGLE_KEY) == GPIO_LOW);
         uint8_t speed_mode_pressed = motor_switch_sample(&speed_mode_switch_state,
             gpio_get_level(SPEED_MODE_TOGGLE_KEY) == GPIO_LOW);
 #if SERVO_CENTER_TEST_MODE
@@ -182,15 +170,6 @@ void PIT_IRQHandler(void)
                                                        SERVO_CALIBRATION_MIN,
                                                        SERVO_CALIBRATION_MAX);
 #endif
-        if (protection_pressed)
-        {
-            track_control_set_loss_stop(&track_control,
-                                        protection_switch_state.enabled);
-            protection_enabled = track_control.loss_stop_enabled;
-            motor_feedback_fault = 0U;
-            motor_feedback_watchdog_reset(&motor_feedback_watchdog);
-            motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
-        }
         if (speed_mode_pressed)
         {
 #if SERVO_CENTER_TEST_MODE
@@ -206,9 +185,7 @@ void PIT_IRQHandler(void)
         if (button_pressed)
         {
             motor_feedback_fault = 0;
-            /* C13 intent is based on the state at tick entry. If a protection
-             * already stopped the car in this tick, the same press must not
-             * toggle it back on. */
+            // C13 是唯一的停车命令；上电默认停机，短按启动，再按停车。
             if (was_running)
                 track_control_stop(&track_control, TRACK_STOP_MANUAL);
             else
@@ -225,37 +202,13 @@ void PIT_IRQHandler(void)
         speed_real_r = encoder_data_2;
         speed_real = speed_real_r; // 兼容旧调试变量，明确仅代表右轮。
 
-        // 编码器极性要按实车标定，不能随 DIR 盲目取反或用绝对值掩盖。
-        // 任何反号反馈都先锁定停机，禁止它进入正目标 PID 导致输出增大。
-        if (protection_enabled && track_control.running &&
-            motor_feedback_fault_mask(encoder_data_1, encoder_data_2))
-        {
-            motor_feedback_fault = motor_feedback_fault_mask(encoder_data_1, encoder_data_2);
-            track_control_stop(&track_control, TRACK_STOP_ENCODER);
-        }
-
-        // 编码器反号优先；用上一周期实际 PWM 对应本周期读到的反馈。
-        // 单轮连续 500ms 有驱动却几乎无正计数，锁停两轮，防止 PI 堵转加力。
-        uint8_t no_feedback = motor_feedback_watchdog_sample(&motor_feedback_watchdog,
-            (uint8_t)(protection_enabled && was_running && track_control.running),
-            encoder_data_1, encoder_data_2, (uint32_t)speed_pwm_l, (uint32_t)speed_pwm_r);
-        if (no_feedback)
-        {
-            motor_feedback_fault = no_feedback;
-            track_control_stop(&track_control, TRACK_STOP_NO_FEEDBACK);
-        }
-
-        uint8_t overspeed = motor_overspeed_watchdog_sample(&motor_overspeed_watchdog,
-            (uint8_t)(protection_enabled && was_running && track_control.running),
-            encoder_data_1, encoder_data_2, speed_target);
-        if (overspeed)
-        {
-            motor_feedback_fault = overspeed;
-            track_control_stop(&track_control, TRACK_STOP_OVERSPEED);
-        }
+        // 编码器反向只提示，不停车；速度 PID 的输出仍受非负和满量程限制。
+        motor_feedback_fault = track_control.running
+            ? motor_feedback_fault_mask(encoder_data_1, encoder_data_2) : 0U;
 
         ring_control_tick(&ring_control, track_control.running,
-                          imu_navigation.bias_ready,
+                          (uint8_t)(imu_navigation.device_ready &&
+                                    imu_navigation.bias_ready),
                           imu_navigation.yaw_rate_dps,
                           control_clock_ms);
         /* A visual candidate must not pull the car off the white centerline.
@@ -263,6 +216,16 @@ void PIT_IRQHandler(void)
          * the chassis has physically entered the ring. */
         track_control_set_turn_override(&track_control,
             ring_control_turn_override(&ring_control));
+        // 环岛候选时就提前提高方向环响应，但仍沿视觉中线转向。
+        const uint8_t ring_steering = (uint8_t)(
+            ring_control.phase == RING_STATE_CANDIDATE ||
+            ring_control.phase == RING_STATE_ENTERING ||
+            ring_control.phase == RING_STATE_INSIDE ||
+            ring_control.phase == RING_STATE_EXITING);
+        track_control.config.kp = ring_steering ? TRACK_RING_STEER_KP : TRACK_STEER_KP;
+        track_control.config.kd = ring_steering ? TRACK_RING_STEER_KD : TRACK_STEER_KD;
+        track_control.config.max_servo_rate_deg_s = ring_steering
+            ? TRACK_RING_SERVO_RATE_DEG_S : TRACK_SERVO_RATE_DEG_S;
         track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
         motor_enabled = output.running;
         motor_switch_state.enabled = output.running;
@@ -285,14 +248,12 @@ void PIT_IRQHandler(void)
         speed_target = target_counts;
         if (button_pressed || was_running != motor_enabled)
         {
-            // 用户停机、丢线、停帧和编码器故障都通过同一条归零路径。
+            // 只有 C13 引起的运行状态切换需要清零驱动和 PID 历史。
             pwm_set_duty(MOTOR1_PWM, 0);
             pwm_set_duty(MOTOR2_PWM, 0);
             // 只清历史，不重新加载参数，保留将来分别标定的左右轮增益。
             Pid_Reset(&speed_pid_l);
             Pid_Reset(&speed_pid_r);
-            motor_feedback_watchdog_reset(&motor_feedback_watchdog);
-            motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
             speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
         }
 

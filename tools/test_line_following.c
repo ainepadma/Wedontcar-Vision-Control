@@ -324,7 +324,13 @@ static void test_loss(simulation_t *sim, uint8_t *image)
     CHECK(sim->output.running && sim->control.lost_frames == 2U);
     CHECK(sim->output.target_speed == sim->control.config.speed_curve_min);
     step(sim, image, 1U);
-    step(sim, image, 1U); /* Third consecutive invalid image at 160 ms stops. */
+    step(sim, image, 1U); /* Third consecutive invalid image. */
+    CHECK(sim->output.running);
+    step(sim, image, 1U);
+    step(sim, image, 1U); /* Fourth invalid image remains in grace. */
+    CHECK(sim->output.running && sim->control.lost_frames == 4U);
+    step(sim, image, 1U);
+    step(sim, image, 1U); /* Fifth consecutive invalid image stops. */
     CHECK(!sim->vision.valid && !sim->output.running && !sim->output.ready);
     CHECK(sim->output.stop_reason == TRACK_STOP_LOST);
     CHECK(sim->output.target_speed == 0.0f && sim->button.enabled == 0U);
@@ -339,14 +345,14 @@ static void test_stale(simulation_t *sim, uint8_t *image)
     draw_lane(image, sim->rows, sim->cols, 0);
     prepare_running(sim, image);
     CHECK(sim->control.last_frame_ms == 100U);
-    for (unsigned int tick = 1U; tick <= 15U; ++tick)
+    for (unsigned int tick = 1U; tick <= 25U; ++tick)
     {
         step(sim, NULL, 1U);
-        CHECK(sim->output.running); /* Exactly 150 ms remains within freshness limit. */
+        CHECK(sim->output.running); /* Exactly 250 ms remains within freshness limit. */
     }
-    CHECK(sim->now_ms - sim->control.last_frame_ms == 150U);
+    CHECK(sim->now_ms - sim->control.last_frame_ms == 250U);
     step(sim, NULL, 1U);
-    CHECK(sim->now_ms - sim->control.last_frame_ms == 160U);
+    CHECK(sim->now_ms - sim->control.last_frame_ms == 260U);
     CHECK(!sim->output.running && !sim->output.ready);
     CHECK(sim->output.stop_reason == TRACK_STOP_STALE);
     CHECK(sim->output.target_speed == 0.0f && sim->button.enabled == 0U);
@@ -374,7 +380,7 @@ static void test_loss_stop_override(simulation_t *sim, uint8_t *image)
 
     /* With no further frames, stale protection is also bypassed, while the
      * existing target, PID, encoder polarity and no-feedback guards continue. */
-    advance(sim, NULL, 1U, 20U);
+    advance(sim, NULL, 1U, 30U);
     CHECK(sim->output.running && !sim->output.ready);
     CHECK(sim->pwm_left > 0.0f && sim->pwm_right > 0.0f);
 

@@ -12,6 +12,8 @@
 #define TRACK_SPEED_FULL_SCALE (TRACK_SPEED_FULL_STRAIGHT / TRACK_SPEED_STRAIGHT)
 /* Full steering applies +/-10% wheel-speed differential around the base target. */
 #define TRACK_DIFF_GAIN 0.10f
+#define TRACK_LOST_STOP_FRAMES 5U
+#define TRACK_STALE_MS 250U
 
 typedef enum
 {
@@ -73,8 +75,8 @@ typedef struct
 /* A single ISR owns the state. No function calls hardware or allocates memory.
  * error/heading are normalized to [-1000,1000], positive toward servo_right.
  * Three distinct valid observations (confidence >= 45) qualify a start.
- * While running, one or two consecutive invalid observations retain the last
- * steering command at curve-minimum speed; the third invalid frame stops when
+ * While running, up to four consecutive invalid observations retain the last
+ * steering command at curve-minimum speed; the fifth invalid frame stops when
  * loss-stop protection is enabled. Any valid frame clears this streak.
  * Frame timestamps must increase modulo uint32_t; duplicate valid timestamps
  * do not qualify another frame. Call tick every 10 ms, even while stopped.
