@@ -14,7 +14,7 @@
 } while (0)
 
 static const track_control_config_t config = {
-    92.5f, 100.0f, 85.0f, 20.0f, 10.0f, 0.02f, 0.0005f, 60.0f
+    87.0f, 98.5f, 75.5f, 20.0f, 10.0f, 0.02f, 0.0005f, 60.0f
 };
 
 static void qualify(track_control_state_t *state, int16_t error, int16_t heading,
@@ -71,14 +71,15 @@ static void test_steering_and_speed(void)
         qualify(&state, (int16_t)(sign * 1000), 0, 0U);
         track_control_toggle(&state, 40U);
         float previous = config.servo_center;
-        for (uint32_t now = 50U; now <= 240U; now += 10U)
+        for (uint32_t now = 50U; now <= 350U; now += 10U)
         {
             if (now % 20U == 0U)
                 track_control_observe(&state, (int16_t)(sign * 1000), 0, 100U, 1U, now);
             track_control_output_t output = track_control_tick(&state, now);
             CHECK(output.running);
             CHECK(fabsf(output.servo_angle - previous) <= 0.60001f);
-            CHECK(output.servo_angle >= 85.0f && output.servo_angle <= 100.0f);
+            CHECK(output.servo_angle >= config.servo_right &&
+                  output.servo_angle <= config.servo_left);
             CHECK(sign > 0 ? output.servo_angle <= previous : output.servo_angle >= previous);
             CHECK(output.target_speed == config.speed_curve_min);
             previous = output.servo_angle;
@@ -111,11 +112,11 @@ static void test_independent_servo_center(void)
 {
     track_control_state_t defaults;
     track_control_init(&defaults, NULL);
-    CHECK(defaults.config.servo_center == 92.5f);
-    CHECK(config.servo_center == 92.5f);
+    CHECK(defaults.config.servo_center == 87.0f);
+    CHECK(config.servo_center == 87.0f);
 
     track_control_config_t asymmetric = config;
-    asymmetric.servo_center = 96.25f;
+    asymmetric.servo_center = 90.25f;
     CHECK(asymmetric.servo_center !=
           (asymmetric.servo_left + asymmetric.servo_right) * 0.5f);
     for (int sign = -1; sign <= 1; sign += 2)
@@ -163,15 +164,16 @@ static void test_independent_servo_center(void)
             previous = output.servo_angle;
         }
         CHECK(fabsf(previous - asymmetric.servo_center) < 0.0001f);
-        CHECK(fabsf(previous - 92.5f) > 3.0f);
+        CHECK(fabsf(previous - 87.0f) > 3.0f);
     }
-    puts("PASS independent calibrated center, both directions, zero return, bounds/rate, default 92.5");
+    puts("PASS independent calibrated center, both directions, zero return, bounds/rate, default 87.0");
 }
 
 static void test_loss_stale_and_encoder(void)
 {
     const uint8_t reasons[] = {
-        TRACK_STOP_LOST, TRACK_STOP_STALE, TRACK_STOP_ENCODER, TRACK_STOP_NO_FEEDBACK
+        TRACK_STOP_LOST, TRACK_STOP_STALE, TRACK_STOP_ENCODER, TRACK_STOP_NO_FEEDBACK,
+        TRACK_STOP_OVERSPEED
     };
     for (unsigned int i = 0U; i < sizeof(reasons) / sizeof(reasons[0]); ++i)
     {
@@ -219,6 +221,8 @@ static void test_default_speed_profile(void)
     track_control_state_t state;
     track_control_init(&state, NULL);
     CHECK(TRACK_SPEED_STRAIGHT == 120.0f && TRACK_SPEED_CURVE_MIN == 80.0f);
+    CHECK(TRACK_SPEED_FULL_STRAIGHT == 240.0f && TRACK_SPEED_FULL_CURVE_MIN == 160.0f);
+    CHECK(TRACK_SPEED_FULL_SCALE == 2.0f);
     CHECK(state.config.speed_straight == TRACK_SPEED_STRAIGHT);
     CHECK(state.config.speed_curve_min == TRACK_SPEED_CURVE_MIN);
     qualify(&state, 0, 0, 0U);
@@ -289,6 +293,98 @@ static void test_loss_stop_switch(void)
     puts("PASS C14 free-run override bypasses vision gates but retains explicit manual control");
 }
 
+static void test_loss_stop_reenable_reasons(void)
+{
+    track_control_state_t state;
+
+    /* No camera publication at all: C14 must close the deliberate free-run
+     * session as NOT_READY, and it must not auto-restart later. */
+    track_control_init(&state, &config);
+    track_control_set_loss_stop(&state, 0U);
+    track_control_toggle(&state, 0U);
+    CHECK(state.running);
+    track_control_set_loss_stop(&state, 1U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_NOT_READY);
+    track_control_observe(&state, 0, 0, 100U, 1U, 20U);
+    CHECK(!state.running);
+
+    /* A current invalid observation is LOST, not NOT_READY. */
+    track_control_init(&state, &config);
+    track_control_set_loss_stop(&state, 0U);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+    track_control_observe(&state, 0, 0, 0U, 0U, 60U);
+    CHECK(state.running);
+    track_control_set_loss_stop(&state, 1U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_LOST);
+
+    /* If the last publication has already aged out while C14 is disabled,
+     * preserve STALE as the cause when protection is re-enabled. */
+    track_control_init(&state, &config);
+    track_control_set_loss_stop(&state, 0U);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+    CHECK(track_control_tick(&state, 191U).running);
+    track_control_set_loss_stop(&state, 1U);
+    CHECK(!state.running && state.stop_reason == TRACK_STOP_STALE);
+
+    /* A fresh valid frame must remain running when C14 is re-enabled. */
+    track_control_init(&state, &config);
+    track_control_set_loss_stop(&state, 0U);
+    qualify(&state, 0, 0, 0U);
+    track_control_toggle(&state, 40U);
+    track_control_set_loss_stop(&state, 1U);
+    CHECK(state.running && state.stop_reason == TRACK_STOP_NONE);
+    puts("PASS C14 re-enable distinguishes no-frame, lost, stale and fresh states");
+}
+
+static void test_invalid_frame_holds_steering(void)
+{
+    track_control_state_t state;
+    track_control_output_t output;
+    float held_angle;
+
+    track_control_init(&state, &config);
+    qualify(&state, 1000, 0, 0U);
+    track_control_toggle(&state, 40U);
+    output = track_control_tick(&state, 50U);
+    held_angle = output.servo_angle;
+
+    /* The first two bad frames use the grace period but must not continue
+     * steering toward a target derived from stale geometry. */
+    track_control_observe(&state, 0, 0, 0U, 0U, 60U);
+    output = track_control_tick(&state, 60U);
+    CHECK(output.running && output.target_speed == config.speed_curve_min);
+    CHECK(output.servo_angle == held_angle);
+    CHECK(state.derivative == 0.0f && !state.derivative_ready);
+    track_control_observe(&state, 0, 0, 0U, 0U, 80U);
+    output = track_control_tick(&state, 80U);
+    CHECK(output.running && output.servo_angle == held_angle);
+
+    /* With C14 disabled, stale data may not stop the motors, but steering and
+     * derivative state must still be frozen/reset until a new valid frame. */
+    track_control_init(&state, &config);
+    track_control_set_loss_stop(&state, 0U);
+    qualify(&state, -1000, 0, 0U);
+    track_control_toggle(&state, 40U);
+    held_angle = track_control_tick(&state, 50U).servo_angle;
+    state.derivative = 123.0f;
+    state.derivative_ready = 1U;
+    output = track_control_tick(&state, 191U);
+    CHECK(output.running && output.target_speed == config.speed_curve_min);
+    CHECK(output.servo_angle == held_angle);
+    CHECK(state.derivative == 0.0f && !state.derivative_ready);
+
+    /* The first recovered frame starts a new derivative sequence and remains
+     * subject to the configured servo slew limit. */
+    track_control_observe(&state, 1000, 0, 100U, 1U, 200U);
+    CHECK(state.derivative == 0.0f && state.derivative_ready);
+    output = track_control_tick(&state, 201U);
+    CHECK(fabsf(output.servo_angle - held_angle) <=
+          config.max_servo_rate_deg_s * 0.01001f);
+    puts("PASS invalid/stale frames hold steering and recovery resets derivative");
+}
+
 static void test_timing_and_pd(void)
 {
     track_control_state_t state;
@@ -296,7 +392,7 @@ static void test_timing_and_pd(void)
     qualify(&state, 1000, 0, UINT32_MAX - 49U);
     track_control_toggle(&state, UINT32_MAX - 9U);
     track_control_output_t output = track_control_tick(&state, 0U);
-    CHECK(output.running && fabsf(output.servo_angle - 91.9f) < 0.0001f);
+    CHECK(output.running && fabsf(output.servo_angle - (config.servo_center - 0.6f)) < 0.0001f);
     track_control_observe(&state, 1000, 0, 100U, 1U, 10U);
     CHECK(state.derivative == 0.0f);
     track_control_observe(&state, 0, 0, 100U, 1U, 30U);
@@ -361,7 +457,10 @@ static void test_randomized_invariants(void)
             track_control_stop(&state, TRACK_STOP_ENCODER);
         track_control_output_t output = track_control_tick(&state, now);
         check_output(output);
-        CHECK(output.servo_angle >= 85.0f && output.servo_angle <= 100.0f);
+        CHECK(output.servo_angle >= fminf(state.config.servo_left,
+                                          state.config.servo_right));
+        CHECK(output.servo_angle <= fmaxf(state.config.servo_left,
+                                          state.config.servo_right));
         CHECK(fabsf(output.servo_angle - previous_angle) <= 0.60001f);
         CHECK(state.ready_frames <= 3U);
         CHECK(!output.running || state.frame_valid ||
@@ -417,6 +516,8 @@ int main(void)
     test_loss_stale_and_encoder();
     test_default_speed_profile();
     test_loss_stop_switch();
+    test_loss_stop_reenable_reasons();
+    test_invalid_frame_holds_steering();
     test_timing_and_pd();
     test_abnormal_inputs();
     test_randomized_invariants();

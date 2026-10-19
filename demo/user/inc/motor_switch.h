@@ -27,6 +27,45 @@ typedef struct
     uint8_t bad_windows[2];
 } motor_feedback_watchdog_t;
 
+/* A wheel held off the ground can accelerate far beyond its closed-loop
+ * target. Ten consecutive 10-ms samples above 2*target+20 report that wheel.
+ * The persistence and margin reject short encoder spikes and speed changes. */
+typedef struct
+{
+    uint8_t high_ticks[2];
+} motor_overspeed_watchdog_t;
+
+static inline void motor_overspeed_watchdog_reset(motor_overspeed_watchdog_t *state)
+{
+    if (state == 0)
+        return;
+    state->high_ticks[0] = 0U;
+    state->high_ticks[1] = 0U;
+}
+
+static inline uint8_t motor_overspeed_watchdog_sample(
+    motor_overspeed_watchdog_t *state, uint8_t enabled, int16_t left, int16_t right,
+    float target)
+{
+    uint8_t fault_mask = 0U;
+    const float limit = target * 2.0f + 20.0f;
+
+    if (state == 0)
+        return 0U;
+    for (uint8_t wheel = 0U; wheel < 2U; ++wheel)
+    {
+        const int16_t feedback = wheel == 0U ? left : right;
+        if (enabled == 0U || target <= 0.0f || (float)feedback <= limit)
+            state->high_ticks[wheel] = 0U;
+        else if (state->high_ticks[wheel] < 10U)
+            ++state->high_ticks[wheel];
+
+        if (state->high_ticks[wheel] >= 10U)
+            fault_mask = (uint8_t)(fault_mask | (uint8_t)(1U << wheel));
+    }
+    return fault_mask;
+}
+
 static inline void motor_feedback_watchdog_reset(motor_feedback_watchdog_t *state)
 {
     if (state == 0)

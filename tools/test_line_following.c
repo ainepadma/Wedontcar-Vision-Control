@@ -98,7 +98,10 @@ static void step(simulation_t *sim, const uint8_t *image, uint8_t pressed)
     {
         ++sim->button_events;
         sim->feedback_fault = 0U;
-        track_control_toggle(&sim->control, sim->now_ms);
+        if (was_running)
+            track_control_stop(&sim->control, TRACK_STOP_MANUAL);
+        else
+            track_control_toggle(&sim->control, sim->now_ms);
     }
     sim->measured_left = sim->feedback_left;
     sim->measured_right = sim->feedback_right;
@@ -375,9 +378,11 @@ static void test_loss_stop_override(simulation_t *sim, uint8_t *image)
     CHECK(sim->output.running && !sim->output.ready);
     CHECK(sim->pwm_left > 0.0f && sim->pwm_right > 0.0f);
 
-    track_control_set_loss_stop(&sim->control, 1U); /* Invalid current frame stops immediately. */
+    /* The last invalid publication has also exceeded the freshness limit, so
+     * re-enabling C14 must retain the more precise STALE cause. */
+    track_control_set_loss_stop(&sim->control, 1U);
     step(sim, NULL, 1U);
-    CHECK(!sim->output.running && sim->output.stop_reason == TRACK_STOP_LOST);
+    CHECK(!sim->output.running && sim->output.stop_reason == TRACK_STOP_STALE);
     CHECK(sim->pid_resets == old_pid_resets + 1U);
     CHECK(sim->pwm_left == 0.0f && sim->pwm_right == 0.0f);
     check_pid_history_zero(&sim->pid_left);

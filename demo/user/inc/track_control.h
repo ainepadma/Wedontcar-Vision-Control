@@ -7,6 +7,9 @@
  * First loaded-running tune, not a calibrated physical speed specification. */
 #define TRACK_SPEED_STRAIGHT 120.0f
 #define TRACK_SPEED_CURVE_MIN 80.0f
+#define TRACK_SPEED_FULL_STRAIGHT 240.0f
+#define TRACK_SPEED_FULL_CURVE_MIN 160.0f
+#define TRACK_SPEED_FULL_SCALE (TRACK_SPEED_FULL_STRAIGHT / TRACK_SPEED_STRAIGHT)
 
 typedef enum
 {
@@ -16,7 +19,8 @@ typedef enum
     TRACK_STOP_LOST,
     TRACK_STOP_STALE,
     TRACK_STOP_ENCODER,
-    TRACK_STOP_NO_FEEDBACK
+    TRACK_STOP_NO_FEEDBACK,
+    TRACK_STOP_OVERSPEED
 } track_control_stop_reason_t;
 
 typedef struct
@@ -39,6 +43,7 @@ typedef struct
     uint8_t ready_frames;
     uint8_t has_frame;
     uint8_t frame_valid;
+    uint8_t frame_stale;
     uint8_t lost_frames;
     uint8_t derivative_ready;
     uint8_t has_tick;
@@ -62,7 +67,7 @@ typedef struct
 
 /* A single ISR owns the state. No function calls hardware or allocates memory.
  * error/heading are normalized to [-1000,1000], positive toward servo_right.
- * Three distinct valid observations (confidence >= 60) qualify a start.
+ * Three distinct valid observations (confidence >= 45) qualify a start.
  * While running, one or two consecutive invalid observations retain the last
  * steering command at curve-minimum speed; the third invalid frame stops when
  * loss-stop protection is enabled. Any valid frame clears this streak.
@@ -75,10 +80,9 @@ void track_control_observe(track_control_state_t *state, int16_t error,
                            int16_t heading, uint8_t confidence, uint8_t valid,
                            uint32_t now_ms);
 void track_control_toggle(track_control_state_t *state, uint32_t now_ms);
-/* Image observations and steering always remain active. When disabled, this
- * switch also bypasses the valid-track start gate and automatic invalid/stale
- * stops. It defaults enabled; manual, encoder and no-feedback stops, plus the
- * motor PWM ceiling, are never bypassed. */
+/* Image observations and steering always remain active. This is the track
+ * portion of the C14 master protection switch; the ISR applies the same switch
+ * to encoder direction, no-feedback and overspeed protection. */
 void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled);
 void track_control_stop(track_control_state_t *state, uint8_t reason);
 track_control_output_t track_control_tick(track_control_state_t *state,

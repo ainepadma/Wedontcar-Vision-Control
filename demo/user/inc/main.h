@@ -3,15 +3,23 @@
 #include "track_vision.h"
 #include "track_control.h"
 
-// 主板 C12 / KEY_4，低电平按下；不要按住此键上电或复位。
+// 临时端点标定模式已关闭；设为1时电机强制为零，C12/C15以0.5度调节舵机。
+#define SERVO_CENTER_TEST_MODE 0
+#define SERVO_CALIBRATION_MIN (70.0f)
+#define SERVO_CALIBRATION_MAX (110.0f)
+
+// C12 同时控制屏幕与 USB 图传；默认开启，关闭后不刷新屏幕、不复制/发送预览帧。
 #define SCREEN_TOGGLE_KEY C12
 // C13 / KEY_3 控制两个驱动电机；上电默认停止，按住上电不会启动。
 #define MOTOR_TOGGLE_KEY C13
-// C14 / KEY_2 切换丢线自动停机；上电默认开启，关闭不停止图像循迹。
-#define TRACK_LOSS_STOP_TOGGLE_KEY C14
+// C14 / KEY_2 控制全部自动保护；默认开启，关闭后仅保留 C13 手动停机和 PWM 硬限幅。
+#define PROTECTION_TOGGLE_KEY C14
+// C15 / KEY_1 切换低速/全速；上电默认低速。
+#define SPEED_MODE_TOGGLE_KEY C15
 extern volatile uint8_t motor_enabled;
 extern volatile uint8_t motor_feedback_fault; // 1=左、2=右、3=两侧；原因见 track_stop_reason
-extern volatile uint8_t track_loss_stop_enabled;
+extern volatile uint8_t protection_enabled;
+extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
 extern volatile uint8_t track_stop_reason;
 extern volatile int16_t track_servo_tenths;
@@ -50,10 +58,10 @@ void track_frame_publish(const track_vision_result_t *result);
 // 舵机参数设置
 #define SERVO_MOTOR_PWM (PWM4_MODULE2_CHA_C30) // 定义主板上舵机对应引脚
 #define SERVO_MOTOR_FREQ (50)                  // 定义主板上舵机频率  请务必注意范围 50-300
-#define SERVO_MOTOR_L_MAX (100)  // 定义主板上舵机活动范围(左打方向的极限值) 角度 自行标定
-#define SERVO_MOTOR_R_MAX (85) // 定义主板上舵机活动范围(右打方向的极限值) 角度 自行标定
-// 独立中位，当前保持原来的 92.5 度；实际直行位置需架空标定，不能照搬参考车数值。
-#define SERVO_MOTOR_CENTER (92.5f)
+#define SERVO_MOTOR_L_MAX (98.5f)  // 实车标定的左侧安全端点
+#define SERVO_MOTOR_R_MAX (75.5f)  // 实车标定的右侧安全端点
+// 实车按键标定确认 87.0 度为机械正中。
+#define SERVO_MOTOR_CENTER (87.0f)
 #define SERVO_DIR (SERVO_MOTOR_L_MAX>SERVO_MOTOR_R_MAX?-1.f:1.f) // 根据左右duty的大小自动决定舵机方向
 
 // 速度目标位于 track_control.h，单位是编码器计数/10ms，不是 RPM 或 m/s。

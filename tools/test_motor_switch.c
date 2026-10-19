@@ -336,6 +336,33 @@ static void test_watchdog_saturation_and_negative(void)
     puts("PASS watchdog saturation, long runtime, signed extremes, and null guards");
 }
 
+static void test_overspeed_watchdog(void)
+{
+    motor_overspeed_watchdog_t state = {0};
+
+    /* At target 120 the strict fault boundary is ten samples above 260. */
+    for (unsigned int tick = 1U; tick <= 100U; ++tick)
+        CHECK(motor_overspeed_watchdog_sample(&state, 1U, 260, 240, 120.0f) == 0U);
+    for (unsigned int tick = 1U; tick <= 10U; ++tick)
+        CHECK(motor_overspeed_watchdog_sample(&state, 1U, 261, 240, 120.0f) ==
+              (tick < 10U ? 0U : 1U));
+
+    motor_overspeed_watchdog_reset(&state);
+    for (unsigned int tick = 1U; tick <= 9U; ++tick)
+        CHECK(motor_overspeed_watchdog_sample(&state, 1U, 300, 300, 120.0f) == 0U);
+    CHECK(motor_overspeed_watchdog_sample(&state, 0U, INT16_MAX, INT16_MAX,
+                                          120.0f) == 0U);
+    CHECK(state.high_ticks[0] == 0U && state.high_ticks[1] == 0U);
+
+    for (unsigned int tick = 1U; tick <= 10U; ++tick)
+        CHECK(motor_overspeed_watchdog_sample(&state, 1U, 0, 501, 240.0f) ==
+              (tick < 10U ? 0U : 2U));
+    motor_overspeed_watchdog_reset(0);
+    CHECK(motor_overspeed_watchdog_sample(0, 1U, INT16_MAX, INT16_MAX,
+                                          1.0f) == 0U);
+    puts("PASS overspeed persistence, low/full thresholds, disable/reset, and masks");
+}
+
 int main(void)
 {
     test_default_and_startup_hold();
@@ -348,6 +375,7 @@ int main(void)
     test_watchdog_disable_and_low_pwm();
     test_watchdog_window_feedback();
     test_watchdog_saturation_and_negative();
+    test_overspeed_watchdog();
     puts("All motor-switch host tests passed.");
     return EXIT_SUCCESS;
 }

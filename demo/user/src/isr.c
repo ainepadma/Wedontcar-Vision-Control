@@ -44,13 +44,20 @@ int16 encoder_data_3 = 0;
 int16 encoder_data_4 = 0;
 volatile uint8_t motor_enabled = 0;
 volatile uint8_t motor_feedback_fault = 0;
-volatile uint8_t track_loss_stop_enabled = 1;
+volatile uint8_t protection_enabled = 1;
+volatile uint8_t speed_full_enabled = 0;
 volatile uint8_t track_ready = 0;
 volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
 volatile int16_t track_servo_tenths = 0;
 static motor_switch_t motor_switch_state;
-static motor_switch_t track_loss_stop_switch_state;
+static motor_switch_t protection_switch_state;
+static motor_switch_t speed_mode_switch_state;
+#if SERVO_CENTER_TEST_MODE
+static motor_switch_t servo_decrease_switch_state;
+static float servo_center_test_angle = SERVO_MOTOR_CENTER;
+#endif
 static motor_feedback_watchdog_t motor_feedback_watchdog;
+static motor_overspeed_watchdog_t motor_overspeed_watchdog;
 static track_control_state_t track_control;
 static volatile uint32_t control_clock_ms;
 static uint32_t consumed_frame_generation;
@@ -76,9 +83,18 @@ void track_runtime_init(void)
         .max_servo_rate_deg_s = TRACK_SERVO_RATE_DEG_S
     };
     track_control_init(&track_control, &config);
-    track_loss_stop_switch_state.enabled = 1U;
-    track_loss_stop_enabled = 1U;
+    protection_switch_state.enabled = 1U;
+    speed_mode_switch_state.enabled = 0U;
+    protection_enabled = 1U;
+    speed_full_enabled = 0U;
+#if SERVO_CENTER_TEST_MODE
+    // 中值测试不依赖赛道就绪；C13 只用于开关舵机输出。
+    track_control_set_loss_stop(&track_control, 0U);
+    protection_switch_state.enabled = 0U;
+    protection_enabled = 0U;
+#endif
     motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+    motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
     speed_target = 0.0f;
     motor_enabled = 0;
     track_servo_tenths = (int16_t)(track_control.servo_angle * 10.0f);
@@ -127,18 +143,49 @@ void PIT_IRQHandler(void)
         // 独立于图像主循环：30ms 去抖，长按不连发，上电按住不启动。
         uint8_t button_pressed = motor_switch_sample(&motor_switch_state,
                                                      gpio_get_level(MOTOR_TOGGLE_KEY) == GPIO_LOW);
-        uint8_t loss_stop_pressed = motor_switch_sample(&track_loss_stop_switch_state,
-            gpio_get_level(TRACK_LOSS_STOP_TOGGLE_KEY) == GPIO_LOW);
-        if (loss_stop_pressed)
+        uint8_t protection_pressed = motor_switch_sample(&protection_switch_state,
+            gpio_get_level(PROTECTION_TOGGLE_KEY) == GPIO_LOW);
+        uint8_t speed_mode_pressed = motor_switch_sample(&speed_mode_switch_state,
+            gpio_get_level(SPEED_MODE_TOGGLE_KEY) == GPIO_LOW);
+#if SERVO_CENTER_TEST_MODE
+        uint8_t servo_decrease_pressed = motor_switch_sample(&servo_decrease_switch_state,
+            gpio_get_level(SCREEN_TOGGLE_KEY) == GPIO_LOW);
+        if (servo_decrease_pressed)
+            servo_center_test_angle = constrain_float(servo_center_test_angle - 0.5f,
+                                                       SERVO_CALIBRATION_MIN,
+                                                       SERVO_CALIBRATION_MAX);
+#endif
+        if (protection_pressed)
         {
             track_control_set_loss_stop(&track_control,
-                                        track_loss_stop_switch_state.enabled);
-            track_loss_stop_enabled = track_control.loss_stop_enabled;
+                                        protection_switch_state.enabled);
+            protection_enabled = track_control.loss_stop_enabled;
+            motor_feedback_fault = 0U;
+            motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+            motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
+        }
+        if (speed_mode_pressed)
+        {
+#if SERVO_CENTER_TEST_MODE
+            servo_center_test_angle = constrain_float(servo_center_test_angle + 0.5f,
+                                                       SERVO_CALIBRATION_MIN,
+                                                       SERVO_CALIBRATION_MAX);
+#else
+            speed_full_enabled = speed_mode_switch_state.enabled;
+            Pid_Reset(&speed_pid_l);
+            Pid_Reset(&speed_pid_r);
+#endif
         }
         if (button_pressed)
         {
             motor_feedback_fault = 0;
-            track_control_toggle(&track_control, control_clock_ms);
+            /* C13 intent is based on the state at tick entry. If a protection
+             * already stopped the car in this tick, the same press must not
+             * toggle it back on. */
+            if (was_running)
+                track_control_stop(&track_control, TRACK_STOP_MANUAL);
+            else
+                track_control_toggle(&track_control, control_clock_ms);
         }
 
         // 获取编码器读数
@@ -153,7 +200,8 @@ void PIT_IRQHandler(void)
 
         // 编码器极性要按实车标定，不能随 DIR 盲目取反或用绝对值掩盖。
         // 任何反号反馈都先锁定停机，禁止它进入正目标 PID 导致输出增大。
-        if (track_control.running && motor_feedback_fault_mask(encoder_data_1, encoder_data_2))
+        if (protection_enabled && track_control.running &&
+            motor_feedback_fault_mask(encoder_data_1, encoder_data_2))
         {
             motor_feedback_fault = motor_feedback_fault_mask(encoder_data_1, encoder_data_2);
             track_control_stop(&track_control, TRACK_STOP_ENCODER);
@@ -162,7 +210,7 @@ void PIT_IRQHandler(void)
         // 编码器反号优先；用上一周期实际 PWM 对应本周期读到的反馈。
         // 单轮连续 500ms 有驱动却几乎无正计数，锁停两轮，防止 PI 堵转加力。
         uint8_t no_feedback = motor_feedback_watchdog_sample(&motor_feedback_watchdog,
-            (uint8_t)(was_running && track_control.running),
+            (uint8_t)(protection_enabled && was_running && track_control.running),
             encoder_data_1, encoder_data_2, (uint32_t)speed_pwm_l, (uint32_t)speed_pwm_r);
         if (no_feedback)
         {
@@ -170,13 +218,31 @@ void PIT_IRQHandler(void)
             track_control_stop(&track_control, TRACK_STOP_NO_FEEDBACK);
         }
 
+        uint8_t overspeed = motor_overspeed_watchdog_sample(&motor_overspeed_watchdog,
+            (uint8_t)(protection_enabled && was_running && track_control.running),
+            encoder_data_1, encoder_data_2, speed_target);
+        if (overspeed)
+        {
+            motor_feedback_fault = overspeed;
+            track_control_stop(&track_control, TRACK_STOP_OVERSPEED);
+        }
+
         track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
         motor_enabled = output.running;
         motor_switch_state.enabled = output.running;
         track_ready = output.ready;
         track_stop_reason = output.stop_reason;
+#if SERVO_CENTER_TEST_MODE
+        track_servo_tenths = (int16_t)(servo_center_test_angle * 10.0f);
+#else
         track_servo_tenths = (int16_t)(output.servo_angle * 10.0f);
-        const float target_counts = output.target_speed; // 同一周期两轮使用同一个目标快照。
+#endif
+        const float target_counts =
+#if SERVO_CENTER_TEST_MODE
+            0.0f;
+#else
+            output.target_speed * (speed_full_enabled ? TRACK_SPEED_FULL_SCALE : 1.0f);
+#endif
         speed_target = target_counts;
         if (button_pressed || was_running != motor_enabled)
         {
@@ -187,11 +253,21 @@ void PIT_IRQHandler(void)
             Pid_Reset(&speed_pid_l);
             Pid_Reset(&speed_pid_r);
             motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+            motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
             speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
         }
 
         if (motor_enabled)
         {
+#if SERVO_CENTER_TEST_MODE
+            // 标定期间只给舵机中值脉冲，禁止任何电机驱动。
+            pwm_set_duty(SERVO_MOTOR_PWM, SERVO_MOTOR_DUTY(servo_center_test_angle));
+            pwm_set_duty(MOTOR1_PWM, 0);
+            pwm_set_duty(MOTOR2_PWM, 0);
+            Pid_Reset(&speed_pid_l);
+            Pid_Reset(&speed_pid_r);
+            speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
+#else
             // 舵机只在用户启动且视觉有效时输出，控制器已经完成角度限幅与限速。
             pwm_set_duty(SERVO_MOTOR_PWM, SERVO_MOTOR_DUTY(output.servo_angle));
             // 保留已实测极性与曲率降速关系；有界 PI 增加低速负载补偿。
@@ -209,6 +285,7 @@ void PIT_IRQHandler(void)
             gpio_set_level(MOTOR2_DIR, MOTOR2_FORWARD_DIR_LEVEL);
             pwm_set_duty(MOTOR2_PWM, (uint32_t)speed_pwm_r);
             speed_pwm = speed_pwm_r;
+#endif
         }
         else
         {

@@ -1,9 +1,11 @@
 #include "main.h" // 所有引脚信息更改在main.h里改宏
 
 // 暗场先轻量去噪，再使用原始大津阈值区分白轨和蓝底。
-// C13 只在赛道连续有效时启动循迹；电机和舵机统一由 10ms 中断控制。
+// C13 控制启停；C14 开启时需赛道有效，关闭时只保留人工停机和 PWM 硬限幅。
 #define CAMERA_SEND_RAW 1
 #define CAMERA_TUNING_EXPOSURE 1024U
+#define TRACK_DISPLAY_WIDTH 125U
+#define TRACK_DISPLAY_HEIGHT 100U
 static uint8_t camera_exposure_status;
 static uint8_t screen_enabled = 1;
 static uint8_t screen_stats_dirty = 1;
@@ -79,7 +81,8 @@ void Init()
     // C13 每 10ms 独立扫描，停机键不依赖摄像头或屏幕刷新。
     // 电机上电保持零输出，必须先松开按键再有效按下才启动。
     gpio_init(MOTOR_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
-    gpio_init(TRACK_LOSS_STOP_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
+    gpio_init(PROTECTION_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
+    gpio_init(SPEED_MODE_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     track_runtime_init();
     pit_ms_init(PIT_CH0, SPEED_CONTROL_PERIOD_MS);
 }
@@ -106,6 +109,18 @@ static void assistant_prepare_raw_image(void)
     }
 }
 #endif
+
+static void assistant_transport_cancel(void)
+{
+    uint32_t primask = interrupt_global_disable();
+    LPUART_DisableInterrupts(LPUART1, kLPUART_TxDataRegEmptyInterruptEnable);
+    camera_tx_position = 0U;
+    camera_tx_length = 0U;
+#if CAMERA_SEND_RAW
+    camera_snapshot_ready = 0U;
+#endif
+    interrupt_global_enable(primask);
+}
 
 void assistant_uart_tx_irq_handler(void)
 {
@@ -151,7 +166,8 @@ static void assistant_send_image(void)
     // LSPD/RSPD 为计数/10ms，TARGET10 为目标计数的10倍，LPWM/RPWM 为PWM指令。
     uint32_t primask = interrupt_global_disable();
     uint8_t snapshot_running = motor_enabled, snapshot_fault = motor_feedback_fault;
-    uint8_t snapshot_loss_stop = track_loss_stop_enabled;
+    uint8_t snapshot_protection = protection_enabled;
+    uint8_t snapshot_full_speed = speed_full_enabled;
     uint8_t snapshot_ready = track_ready, snapshot_stop = track_stop_reason;
     int16_t snapshot_servo = track_servo_tenths;
     float snapshot_target = speed_target;
@@ -159,12 +175,12 @@ static void assistant_send_image(void)
     float snapshot_left_pwm = speed_pwm_l, snapshot_right_pwm = speed_pwm_r;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.1.9 T=%lu CAP=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu SCREEN=%u MOTOR=%u MFAULT=%u LOSTSTOP=%u EXP=%u STATUS=%u TRACK=%u Q=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu\r\n",
+        "#CAM FW=0.2.1 T=%lu CAP=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)processed_frames, (unsigned long)displayed_frames,
         (unsigned long)capture_fps, (unsigned long)process_fps, (unsigned long)display_fps,
         (unsigned int)screen_enabled, (unsigned int)snapshot_running, (unsigned int)snapshot_fault,
-        (unsigned int)snapshot_loss_stop,
+        (unsigned int)snapshot_protection, (unsigned int)snapshot_full_speed,
         CAMERA_TUNING_EXPOSURE, (unsigned int)camera_exposure_status,
         (unsigned int)track_result.valid, (unsigned int)track_result.confidence,
         (int)track_result.error, (int)track_result.heading, (unsigned int)snapshot_ready,
@@ -192,6 +208,10 @@ static void assistant_send_image(void)
 
 static void screen_button_poll(uint32_t now)
 {
+#if SERVO_CENTER_TEST_MODE
+    (void)now;
+    return;
+#else
     static uint8_t last_level = GPIO_LOW;
     static uint8_t stable_level = GPIO_LOW;
     static uint32_t changed_at;
@@ -208,9 +228,12 @@ static void screen_button_poll(uint32_t now)
         {
             screen_enabled = !screen_enabled;
             TFT180_BLK(screen_enabled);
+            if (!screen_enabled)
+                assistant_transport_cancel();
             screen_stats_dirty = 1;
         }
     }
+#endif
 }
 
 static void update_frame_rates(uint32_t now)
@@ -244,6 +267,14 @@ static void update_frame_rates(uint32_t now)
 static void screen_draw_stats(void)
 {
     char line[17];
+#if SERVO_CENTER_TEST_MODE
+    const int16_t middle = track_servo_tenths;
+    snprintf(line, sizeof(line), "MID:%3d.%1d DEG", (int)(middle / 10),
+             (int)(middle >= 0 ? middle % 10 : -(middle % 10)));
+    tft180_show_string(0, 102, line);
+    tft180_show_string(0, 118, "C12-  C15+     ");
+    tft180_show_string(0, 134, motor_enabled ? "C13 SERVO ON  " : "C13 SERVO OFF ");
+#else
     snprintf(line, sizeof(line), "H:%5d S:%4d", (int)track_result.heading,
              (int)track_servo_tenths);
     tft180_show_string(0, 102, line);
@@ -252,21 +283,58 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 118, line);
     if (motor_feedback_fault)
     {
-        snprintf(line, sizeof(line), track_stop_reason == TRACK_STOP_NO_FEEDBACK
-            ? "NO FB:%u      " : "ENC ERR:%u    ", (unsigned int)motor_feedback_fault);
+        const char *fault_format = track_stop_reason == TRACK_STOP_NO_FEEDBACK
+            ? "NO FB:%u      " : (track_stop_reason == TRACK_STOP_OVERSPEED
+            ? "AIR/FAST:%u   " : "ENC ERR:%u    ");
+        snprintf(line, sizeof(line), fault_format, (unsigned int)motor_feedback_fault);
         tft180_show_string(0, 134, line);
     }
-    else if (!track_loss_stop_enabled)
-        tft180_show_string(0, 134, motor_enabled ? "FREE RUN      " : "C13 FREE RUN  ");
+    else if (!protection_enabled)
+        tft180_show_string(0, 134, motor_enabled
+            ? (speed_full_enabled ? "FREE FULL     " : "FREE LOW      ")
+            : "C13 FREE RUN  ");
     else if (motor_enabled)
-        tft180_show_string(0, 134, "TRACK RUN     ");
+        tft180_show_string(0, 134, speed_full_enabled ? "TRACK FULL    " : "TRACK LOW     ");
     else if (track_stop_reason == TRACK_STOP_LOST)
         tft180_show_string(0, 134, "TRACK LOST    ");
     else if (track_stop_reason == TRACK_STOP_STALE)
         tft180_show_string(0, 134, "CAM TIMEOUT   ");
     else
         tft180_show_string(0, 134, track_ready ? "READY C13:GO  " : "WAIT TRACK    ");
+#endif
     screen_stats_dirty = 0;
+}
+
+// 只叠加到 TFT，不改动二值图或控制器输入：红色为左右边沿，蓝色为判定中线。
+static void screen_draw_track_overlay(void)
+{
+    for (uint16_t y = 0U; y < TRACK_DISPLAY_HEIGHT; ++y)
+    {
+        const uint16_t row = (uint16_t)((uint32_t)y * MT9V03X_H /
+                                        TRACK_DISPLAY_HEIGHT);
+        if (!track_result.row_valid[row])
+            continue;
+
+        uint16_t left = (uint16_t)(((uint32_t)track_result.left[row] *
+                                    TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
+                                   MT9V03X_W);
+        uint16_t center = (uint16_t)(((uint32_t)track_result.center[row] *
+                                      TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
+                                     MT9V03X_W);
+        uint16_t right = (uint16_t)(((uint32_t)track_result.right[row] *
+                                     TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
+                                    MT9V03X_W);
+        if (left >= TRACK_DISPLAY_WIDTH)
+            left = TRACK_DISPLAY_WIDTH - 1U;
+        if (center >= TRACK_DISPLAY_WIDTH)
+            center = TRACK_DISPLAY_WIDTH - 1U;
+        if (right >= TRACK_DISPLAY_WIDTH)
+            right = TRACK_DISPLAY_WIDTH - 1U;
+
+        tft180_draw_point(left, y, RGB565_RED);
+        tft180_draw_point(right, y, RGB565_RED);
+        tft180_draw_point(center, y, RGB565_BLUE);
+    }
 }
 
 int main(void)
@@ -286,7 +354,8 @@ int main(void)
     interrupt_global_enable(0);
     camera_exposure_status = mt9v03x_set_exposure_time(CAMERA_TUNING_EXPOSURE);
     uint8_t displayed_motor_state = motor_enabled;
-    uint8_t displayed_loss_stop_state = track_loss_stop_enabled;
+    uint8_t displayed_protection_state = protection_enabled;
+    uint8_t displayed_speed_mode = speed_full_enabled;
     uint32_t last_status_ms = 0;
     uint32_t last_processed_frame = 0;
 
@@ -305,9 +374,14 @@ int main(void)
             displayed_motor_state = motor_enabled;
             screen_stats_dirty = 1;
         }
-        if (displayed_loss_stop_state != track_loss_stop_enabled)
+        if (displayed_protection_state != protection_enabled)
         {
-            displayed_loss_stop_state = track_loss_stop_enabled;
+            displayed_protection_state = protection_enabled;
+            screen_stats_dirty = 1;
+        }
+        if (displayed_speed_mode != speed_full_enabled)
+        {
+            displayed_speed_mode = speed_full_enabled;
             screen_stats_dirty = 1;
         }
         //  mt9v03x摄像头
@@ -350,7 +424,8 @@ int main(void)
                 }
             }
 #if CAMERA_SEND_RAW
-            assistant_prepare_raw_image();
+            if (screen_enabled)
+                assistant_prepare_raw_image();
 #endif
             // 两行缓存原地均值，原始图传快照已冻结；不覆盖 CSI 缓冲。
             if (!image_mean3x3((uint8_t *)image, MT9V03X_H, MT9V03X_W,
@@ -368,28 +443,20 @@ int main(void)
                 ++invalid_vision_frames;
             track_frame_publish(&track_result);
 
-            for (uint16_t _i = 0; _i < MT9V03X_H; ++_i)
-            {
-                // 无效行不画伪中线，避免把丢线显示成“居中”。
-                if (track_result.row_valid[_i])
-                {
-                    image[_i][track_result.left[_i]] = 0;
-                    image[_i][track_result.center[_i]] = 0;
-                    image[_i][track_result.right[_i]] = 0;
-                }
-            }
-            // 显示图像
-            ++processed_frames;
             if (screen_enabled)
             {
-                tft180_displayimage03x((uint8_t *)image, 125, 100);
+                tft180_displayimage03x((uint8_t *)image,
+                                       TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT);
+                screen_draw_track_overlay();
                 ++displayed_frames;
                 if (screen_stats_dirty)
                     screen_draw_stats();
             }
+            ++processed_frames;
 
             // 发送已冻结的本帧灰度图，或按 CAMERA_SEND_RAW 配置发送处理图。
-            assistant_send_image();
+            if (screen_enabled)
+                assistant_send_image();
 
         }
         // 摄像头停帧时也要显示超时/停机状态，不能依赖下一帧到来。

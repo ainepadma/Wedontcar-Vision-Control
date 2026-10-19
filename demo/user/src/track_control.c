@@ -37,7 +37,7 @@ void track_control_init(track_control_state_t *state,
                         const track_control_config_t *config)
 {
     static const track_control_config_t defaults = {
-        92.5f, 100.0f, 85.0f, TRACK_SPEED_STRAIGHT, TRACK_SPEED_CURVE_MIN,
+        87.0f, 98.5f, 75.5f, TRACK_SPEED_STRAIGHT, TRACK_SPEED_CURVE_MIN,
         0.02f, 0.0005f, 60.0f
     };
     track_control_config_t safe;
@@ -71,14 +71,15 @@ void track_control_stop(track_control_state_t *state, uint8_t reason)
     if (state == NULL)
         return;
     state->running = 0U;
-    state->stop_reason = reason >= TRACK_STOP_MANUAL && reason <= TRACK_STOP_NO_FEEDBACK
+    state->stop_reason = reason >= TRACK_STOP_MANUAL && reason <= TRACK_STOP_OVERSPEED
                              ? reason : TRACK_STOP_MANUAL;
     state->derivative = 0.0f;
     state->derivative_ready = 0U;
     if (state->stop_reason == TRACK_STOP_LOST ||
         state->stop_reason == TRACK_STOP_STALE ||
         state->stop_reason == TRACK_STOP_ENCODER ||
-        state->stop_reason == TRACK_STOP_NO_FEEDBACK)
+        state->stop_reason == TRACK_STOP_NO_FEEDBACK ||
+        state->stop_reason == TRACK_STOP_OVERSPEED)
         state->ready_frames = 0U;
     /* Keep the last angle: the hardware owner can disable PWM on a stop. */
 }
@@ -106,10 +107,14 @@ void track_control_observe(track_control_state_t *state, int16_t error,
             track_control_stop(state, TRACK_STOP_STALE);
         state->ready_frames = 0U;
         state->frame_valid = 0U;
+        state->frame_stale = 1U;
+        state->derivative = 0.0f;
+        state->derivative_ready = 0U;
     }
     previous_valid = state->frame_valid;
     state->has_frame = 1U;
     state->last_frame_ms = now_ms;
+    state->frame_stale = 0U;
     if (!valid || confidence < TRACK_MIN_CONFIDENCE)
     {
         if (state->lost_frames < TRACK_LOST_STOP_FRAMES)
@@ -176,8 +181,15 @@ void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled)
         return;
     enabled = enabled != 0U ? 1U : 0U;
     state->loss_stop_enabled = enabled;
-    if (enabled && state->running && state->has_frame && !state->frame_valid)
-        track_control_stop(state, TRACK_STOP_LOST);
+    if (enabled && state->running)
+    {
+        if (!state->has_frame)
+            track_control_stop(state, TRACK_STOP_NOT_READY);
+        else if (state->frame_stale)
+            track_control_stop(state, TRACK_STOP_STALE);
+        else if (!state->frame_valid)
+            track_control_stop(state, TRACK_STOP_LOST);
+    }
 }
 
 track_control_output_t track_control_tick(track_control_state_t *state,
@@ -199,37 +211,47 @@ track_control_output_t track_control_tick(track_control_state_t *state,
             track_control_stop(state, TRACK_STOP_STALE);
         state->ready_frames = 0U;
         state->frame_valid = 0U;
+        state->frame_stale = 1U;
+        state->derivative = 0.0f;
+        state->derivative_ready = 0U;
     }
     if (state->running)
     {
         const track_control_config_t *cfg = &state->config;
-        /* Curve-centre placement can produce a small cross-track error with a
-         * large look-ahead heading. Let heading dominate in that case so the
-         * car turns into the bend instead of continuing almost straight. */
-        double mixed_error = track_clamp((double)state->filtered_error +
-                                        TRACK_HEADING_WEIGHT * state->filtered_heading,
-                                        -1000.0, 1000.0);
-        double correction = (double)cfg->kp * mixed_error +
-                            (double)cfg->kd * state->derivative;
-        double endpoint = correction >= 0.0 ? cfg->servo_right : cfg->servo_left;
-        double span = fabs(endpoint - cfg->servo_center);
-        double offset = fmin(fabs(correction), span);
-        double desired = cfg->servo_center +
-                         (endpoint >= cfg->servo_center ? offset : -offset);
-        double max_step = (double)cfg->max_servo_rate_deg_s * elapsed / 1000.0;
-        double severity = fmax(fabs((double)state->filtered_error) / 600.0,
-                               fabs((double)state->filtered_heading) / 500.0);
-        severity = fmax(severity, span > 0.0 ? offset / span : 0.0);
-        severity = track_clamp(severity, 0.0, 1.0);
-        state->servo_angle = (float)track_clamp(desired,
-            (double)state->servo_angle - max_step, (double)state->servo_angle + max_step);
-        state->servo_angle = (float)track_clamp(state->servo_angle,
-            fmin((double)cfg->servo_left, (double)cfg->servo_right),
-            fmax((double)cfg->servo_left, (double)cfg->servo_right));
-        output.target_speed = (float)((double)cfg->speed_straight * (1.0 - severity) +
-                                     (double)cfg->speed_curve_min * severity);
-        if (!state->frame_valid)
+        if (state->frame_valid)
+        {
+            /* Curve-centre placement can produce a small cross-track error with a
+             * large look-ahead heading. Let heading dominate in that case so the
+             * car turns into the bend instead of continuing almost straight. */
+            double mixed_error = track_clamp((double)state->filtered_error +
+                                            TRACK_HEADING_WEIGHT * state->filtered_heading,
+                                            -1000.0, 1000.0);
+            double correction = (double)cfg->kp * mixed_error +
+                                (double)cfg->kd * state->derivative;
+            double endpoint = correction >= 0.0 ? cfg->servo_right : cfg->servo_left;
+            double span = fabs(endpoint - cfg->servo_center);
+            double offset = fmin(fabs(correction), span);
+            double desired = cfg->servo_center +
+                             (endpoint >= cfg->servo_center ? offset : -offset);
+            double max_step = (double)cfg->max_servo_rate_deg_s * elapsed / 1000.0;
+            double severity = fmax(fabs((double)state->filtered_error) / 600.0,
+                                   fabs((double)state->filtered_heading) / 500.0);
+            severity = fmax(severity, span > 0.0 ? offset / span : 0.0);
+            severity = track_clamp(severity, 0.0, 1.0);
+            state->servo_angle = (float)track_clamp(desired,
+                (double)state->servo_angle - max_step, (double)state->servo_angle + max_step);
+            state->servo_angle = (float)track_clamp(state->servo_angle,
+                fmin((double)cfg->servo_left, (double)cfg->servo_right),
+                fmax((double)cfg->servo_left, (double)cfg->servo_right));
+            output.target_speed = (float)((double)cfg->speed_straight * (1.0 - severity) +
+                                         (double)cfg->speed_curve_min * severity);
+        }
+        else
+        {
+            state->derivative = 0.0f;
+            state->derivative_ready = 0U;
             output.target_speed = cfg->speed_curve_min;
+        }
     }
     output.running = state->running;
     output.ready = track_ready(state, now_ms);
