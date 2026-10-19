@@ -14,12 +14,12 @@
 #define SCREEN_TOGGLE_KEY C12
 // C13 / KEY_3 控制两个驱动电机；上电默认停止，按住上电不会启动。
 #define MOTOR_TOGGLE_KEY C13
-// C14 / KEY_2 控制全部自动保护；默认开启，关闭后仅保留 C13 手动停机和 PWM 硬限幅。
+// C14 暂不参与启停；运行时仅 C13 切换电机启停。
 #define PROTECTION_TOGGLE_KEY C14
 // C15 / KEY_1 切换低速/全速；上电默认低速。
 #define SPEED_MODE_TOGGLE_KEY C15
 extern volatile uint8_t motor_enabled;
-extern volatile uint8_t motor_feedback_fault; // 1=左、2=右、3=两侧；原因见 track_stop_reason
+extern volatile uint8_t motor_feedback_fault; // 编码器反向提示：1=左、2=右、3=两侧；不自动停车
 extern volatile uint8_t protection_enabled;
 extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
@@ -73,7 +73,11 @@ void track_frame_publish(const track_vision_result_t *result);
 // 舵机左右端点仍使用本车原配置；必须架空验证方向和机械限位后才能落地。
 #define TRACK_STEER_KP 0.020f
 #define TRACK_STEER_KD 0.0005f
-#define TRACK_SERVO_RATE_DEG_S 120.0f
+#define TRACK_SERVO_RATE_DEG_S 200.0f
+// 环岛仅提高方向环 PD 响应和舵机角速度，不扩大已标定的机械端点。
+#define TRACK_RING_STEER_KP 0.025f
+#define TRACK_RING_STEER_KD 0.0007f
+#define TRACK_RING_SERVO_RATE_DEG_S 360.0f
 
 // 以下宏在初步测试例程时不可更改，后面若需更改舵机算法可以自行更改
 // ------------------ 舵机占空比计算方式 ------------------

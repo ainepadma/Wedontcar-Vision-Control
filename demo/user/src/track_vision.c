@@ -220,12 +220,10 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
         const int32_t near_center = (int32_t)(near_sum / near_count);
         const int32_t far_center = (int32_t)(far_sum / far_count);
         const int32_t center_delta = far_center - near_center;
-        const uint16_t branch_rows = out->ambiguous_rows + out->disconnected_rows;
-        const uint8_t strong_shape =
-            (uint8_t)(track_distance((uint16_t)near_center, (uint16_t)far_center) >= cols / 20U ||
-                      branch_rows >= track_max(2U, zone_rows / 3U) ||
-                      (uint32_t)out->far_width * 100U >= (uint32_t)cols * 55U);
-        if (strong_shape)
+        /* Symmetric widening alone is a cross, not a directional ring entry.
+         * Require a visible left/right displacement before arming the ring. */
+        if (track_distance((uint16_t)near_center, (uint16_t)far_center) >=
+            track_max(2U, cols / 16U))
         {
             out->ring_candidate = 1U;
             if (center_delta <= -(int32_t)(cols / 16U))

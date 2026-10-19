@@ -186,6 +186,10 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     CHECK(result->ring_direction == 1);
     CHECK(result->far_width > result->near_width);
     CHECK(result->width_growth_percent >= 135U);
+    // A symmetric opening (e.g. a cross) must not arm ring steering.
+    draw_opening_lane(image, rows, cols, 0);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && !result->ring_candidate);
     draw_opening_lane(image, rows, cols, cols / 10);
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->ring_candidate);
