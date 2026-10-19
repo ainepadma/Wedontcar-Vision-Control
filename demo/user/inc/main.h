@@ -2,6 +2,8 @@
 #include "img_process.h"
 #include "track_vision.h"
 #include "track_control.h"
+#include "imu_navigation.h"
+#include "ring_control.h"
 
 // 临时端点标定模式已关闭；设为1时电机强制为零，C12/C15以0.5度调节舵机。
 #define SERVO_CENTER_TEST_MODE 0
@@ -23,6 +25,9 @@ extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
 extern volatile uint8_t track_stop_reason;
 extern volatile int16_t track_servo_tenths;
+extern imu_navigation_state_t imu_navigation;
+extern ring_control_state_t ring_control;
+extern volatile uint8_t imu_device_status;
 void assistant_uart_tx_irq_handler(void);
 void track_runtime_init(void);
 void track_frame_publish(const track_vision_result_t *result);

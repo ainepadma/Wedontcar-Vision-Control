@@ -37,6 +37,7 @@
 #include "isr.h"
 #include "main.h"
 #include "motor_switch.h"
+#include "zf_device_imu660rb.h"
 
 int16 encoder_data_1 = 0;
 int16 encoder_data_2 = 0;
@@ -49,6 +50,9 @@ volatile uint8_t speed_full_enabled = 0;
 volatile uint8_t track_ready = 0;
 volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
 volatile int16_t track_servo_tenths = 0;
+volatile uint8_t imu_device_status = IMU660RB_RESULT_ERROR;
+imu_navigation_state_t imu_navigation;
+ring_control_state_t ring_control;
 static motor_switch_t motor_switch_state;
 static motor_switch_t protection_switch_state;
 static motor_switch_t speed_mode_switch_state;
@@ -66,7 +70,8 @@ static uint32_t consumed_frame_generation;
 static volatile struct
 {
     int16_t error, heading;
-    uint8_t confidence, valid;
+    uint8_t confidence, valid, ring_candidate;
+    int8_t ring_direction;
     uint32_t observed_ms, generation;
 } track_mailbox;
 
@@ -83,6 +88,7 @@ void track_runtime_init(void)
         .max_servo_rate_deg_s = TRACK_SERVO_RATE_DEG_S
     };
     track_control_init(&track_control, &config);
+    ring_control_init(&ring_control);
     protection_switch_state.enabled = 1U;
     speed_mode_switch_state.enabled = 0U;
     protection_enabled = 1U;
@@ -108,6 +114,8 @@ void track_frame_publish(const track_vision_result_t *result)
     track_mailbox.heading = result->heading;
     track_mailbox.confidence = result->confidence;
     track_mailbox.valid = result->valid;
+    track_mailbox.ring_candidate = result->ring_candidate;
+    track_mailbox.ring_direction = result->ring_direction;
     track_mailbox.observed_ms = control_clock_ms;
     ++track_mailbox.generation;
     __DMB();
@@ -133,12 +141,31 @@ void PIT_IRQHandler(void)
     {
         control_clock_ms += SPEED_CONTROL_PERIOD_MS;
         uint8_t was_running = motor_enabled;
+        if (imu_navigation.device_ready)
+        {
+            imu660rb_sample_t sample;
+            imu660rb_result_t imu_result = imu660rb_read_sample(&sample);
+            imu_device_status = imu_result;
+            if (imu_result == IMU660RB_RESULT_OK)
+            {
+                imu_navigation_observe(&imu_navigation,
+                    sample.acc_x, sample.acc_y, sample.acc_z,
+                    sample.gyro_x, sample.gyro_y, sample.gyro_z,
+                    (uint8_t)!was_running);
+            }
+            else if (imu_result == IMU660RB_RESULT_ERROR)
+                imu_navigation.device_ready = 0U;
+        }
         if (track_mailbox.generation != consumed_frame_generation)
         {
             consumed_frame_generation = track_mailbox.generation;
             track_control_observe(&track_control, track_mailbox.error, track_mailbox.heading,
                                   track_mailbox.confidence, track_mailbox.valid,
                                   track_mailbox.observed_ms);
+            ring_control_observe(&ring_control, track_mailbox.ring_candidate,
+                                 track_mailbox.ring_direction,
+                                 track_mailbox.valid, track_mailbox.confidence,
+                                 control_clock_ms);
         }
         // 独立于图像主循环：30ms 去抖，长按不连发，上电按住不启动。
         uint8_t button_pressed = motor_switch_sample(&motor_switch_state,
@@ -232,6 +259,10 @@ void PIT_IRQHandler(void)
         motor_switch_state.enabled = output.running;
         track_ready = output.ready;
         track_stop_reason = output.stop_reason;
+        ring_control_tick(&ring_control, output.running,
+                          imu_navigation.bias_ready,
+                          imu_navigation.yaw_rate_dps,
+                          control_clock_ms);
 #if SERVO_CENTER_TEST_MODE
         track_servo_tenths = (int16_t)(servo_center_test_angle * 10.0f);
 #else

@@ -40,8 +40,20 @@ static void verify(const uint8_t *image, uint16_t rows, uint16_t cols,
     CHECK(guarded->after == UINT64_C(0x8877665544332211));
     CHECK(image_checksum(image, count) == checksum);
     CHECK(guarded->result.confidence <= 100U);
+    CHECK(guarded->result.roi_rows ==
+          (uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U -
+          (uint32_t)rows * TRACK_VISION_ROI_START_PERCENT / 100U);
+    const uint16_t expected_zone_rows = guarded->result.roi_rows / 3U > 0U
+        ? guarded->result.roi_rows / 3U : 1U;
+    CHECK(guarded->result.near_valid_rows <= expected_zone_rows);
+    CHECK(guarded->result.far_valid_rows <= expected_zone_rows);
     CHECK(guarded->result.error >= -1000 && guarded->result.error <= 1000);
     CHECK(guarded->result.heading >= -1000 && guarded->result.heading <= 1000);
+    CHECK(guarded->result.near_width <= cols);
+    CHECK(guarded->result.far_width <= cols);
+    CHECK(guarded->result.ring_candidate <= 1U);
+    CHECK(guarded->result.ring_direction >= -1 &&
+          guarded->result.ring_direction <= 1);
     uint16_t valid_rows = 0;
     for (uint16_t y = 0; y < TRACK_VISION_MAX_ROWS; ++y)
     {
@@ -68,6 +80,8 @@ static void verify(const uint8_t *image, uint16_t rows, uint16_t cols,
     CHECK(guarded->result.valid_rows == valid_rows);
     if (!guarded->result.valid)
         CHECK(guarded->result.error == 0 && guarded->result.heading == 0);
+    else
+        CHECK(guarded->result.reject_flags == TRACK_VISION_REJECT_NONE);
 }
 
 static void draw_lane(uint8_t *image, uint16_t rows, uint16_t cols,
@@ -81,6 +95,24 @@ static void draw_lane(uint8_t *image, uint16_t rows, uint16_t cols,
     {
         const int32_t center = cols / 2 + offset +
             far_bend * (end_row - 1 - y) / (end_row - 1 - start_row);
+        const int32_t left = center - width / 2;
+        CHECK(left > 0 && left + width < cols);
+        memset(image + (uint32_t)y * cols + (uint32_t)left, 255, (size_t)width);
+    }
+}
+
+static void draw_opening_lane(uint8_t *image, uint16_t rows, uint16_t cols,
+                              int32_t far_offset)
+{
+    memset(image, 0, (size_t)rows * cols);
+    const int32_t start_row = (int32_t)((uint32_t)rows * TRACK_VISION_ROI_START_PERCENT / 100U);
+    const int32_t end_row = (int32_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U);
+    const int32_t span = end_row - 1 - start_row;
+    for (int32_t y = start_row; y < end_row; ++y)
+    {
+        const int32_t distance = end_row - 1 - y;
+        const int32_t width = cols * 3 / 10 + (cols * 3 / 10) * distance / span;
+        const int32_t center = cols / 2 + far_offset * distance / span;
         const int32_t left = center - width / 2;
         CHECK(left > 0 && left + width < cols);
         memset(image + (uint32_t)y * cols + (uint32_t)left, 255, (size_t)width);
@@ -105,6 +137,10 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     memset(image, 0, count);
     verify(image, rows, cols, &guarded);
     CHECK(!result->valid && result->valid_rows == 0U);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_NO_SEED) != 0U);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_TOTAL_COVERAGE) != 0U);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_NEAR_COVERAGE) != 0U);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_FAR_COVERAGE) != 0U);
     memset(image, 255, count);
     verify(image, rows, cols, &guarded);
     CHECK(!result->valid && result->valid_rows == 0U);
@@ -121,6 +157,8 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->confidence == 100U);
     CHECK(result->valid_rows == roi_rows);
+    CHECK(result->near_valid_rows == zone_rows);
+    CHECK(result->far_valid_rows == zone_rows);
     CHECK(abs(result->error) <= 10 && result->heading == 0);
 
     draw_lane(image, rows, cols, cols / 8, 0);
@@ -138,6 +176,20 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     draw_lane(image, rows, cols, 0, -(int32_t)(cols / 8));
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->heading < -90 && result->error < 0);
+
+    // Constant-width curves are ordinary track, not ring entrances.
+    CHECK(!result->ring_candidate);
+    draw_opening_lane(image, rows, cols, -(int32_t)(cols / 10));
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid);
+    CHECK(result->ring_candidate);
+    CHECK(result->ring_direction == 1);
+    CHECK(result->far_width > result->near_width);
+    CHECK(result->width_growth_percent >= 135U);
+    draw_opening_lane(image, rows, cols, cols / 10);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->ring_candidate);
+    CHECK(result->ring_direction == -1);
 
     draw_lane(image, rows, cols, 0, 0);
     for (uint16_t y = roi_start; y < roi_end; ++y)
@@ -161,6 +213,8 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     }
     verify(image, rows, cols, &guarded);
     CHECK(!result->valid && result->valid_rows == 0U);
+    CHECK(result->ambiguous_rows == roi_rows);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_NO_SEED) != 0U);
 
     // A distant unrelated bright block must not steal the established track.
     draw_lane(image, rows, cols, 0, 0);
@@ -174,10 +228,23 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     memset(image + (uint32_t)roi_start * cols, 0, (size_t)zone_rows * cols);
     verify(image, rows, cols, &guarded);
     CHECK(!result->valid);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_FAR_COVERAGE) != 0U);
     draw_lane(image, rows, cols, 0, 0);
     memset(image + (uint32_t)(roi_end - zone_rows) * cols, 0, (size_t)zone_rows * cols);
     verify(image, rows, cols, &guarded);
     CHECK(!result->valid);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_NEAR_COVERAGE) != 0U);
+
+    // Fixed car-body occlusion begins below the calibrated 68% lower bound.
+    // It must not split the near-field lane or appear as a false inner edge.
+    draw_lane(image, rows, cols, 0, 0);
+    for (uint16_t y = roi_end; y < rows; ++y)
+        memset(image + (uint32_t)y * cols + cols / 3U, 0, cols / 3U);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->confidence == 100U);
+    CHECK(abs(result->error) <= 10 && result->heading == 0);
+    for (uint16_t y = roi_end; y < rows; ++y)
+        CHECK(result->row_valid[y] == 0U);
 
     // A full-width interruption cannot be replaced with an invented center.
     draw_lane(image, rows, cols, 0, 0);
@@ -233,11 +300,13 @@ static void test_invalid_dimensions(void)
         track_vision_process(&one_pixel, invalid[i][0], invalid[i][1], &guarded.result);
         CHECK(guarded.before == 123U && guarded.after == 456U);
         CHECK(!guarded.result.valid && guarded.result.valid_rows == 0U);
+        CHECK(guarded.result.reject_flags == TRACK_VISION_REJECT_INPUT);
         for (uint16_t row = 0; row < TRACK_VISION_MAX_ROWS; ++row)
             CHECK(guarded.result.row_valid[row] == 0U && guarded.result.center[row] == 0U);
     }
     track_vision_process(NULL, 240, 376, &guarded.result);
     CHECK(!guarded.result.valid && guarded.result.valid_rows == 0U);
+    CHECK(guarded.result.reject_flags == TRACK_VISION_REJECT_INPUT);
     track_vision_process(NULL, 0, 0, NULL);
     puts("PASS empty/null inputs, invalid dimensions, result-array guards");
 }

@@ -1,4 +1,5 @@
 #include "main.h" // 所有引脚信息更改在main.h里改宏
+#include "zf_device_imu660rb.h"
 
 // 暗场先轻量去噪，再使用原始大津阈值区分白轨和蓝底。
 // C13 控制启停；C14 开启时需赛道有效，关闭时只保留人工停机和 PWM 硬限幅。
@@ -6,6 +7,7 @@
 #define CAMERA_TUNING_EXPOSURE 1024U
 #define TRACK_DISPLAY_WIDTH 125U
 #define TRACK_DISPLAY_HEIGHT 100U
+#define IMU_AXIS_TEST_MODE 0
 static uint8_t camera_exposure_status;
 static uint8_t screen_enabled = 1;
 static uint8_t screen_stats_dirty = 1;
@@ -85,6 +87,11 @@ void Init()
     gpio_init(SPEED_MODE_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     track_runtime_init();
     pit_ms_init(PIT_CH0, SPEED_CONTROL_PERIOD_MS);
+
+    // IMU 失败只记录状态，不阻塞摄像头、按键或循迹控制。
+    imu_device_status = imu660rb_init();
+    imu_navigation_init(&imu_navigation,
+                        imu_device_status == IMU660RB_RESULT_OK);
 }
 
 uint8_t image[MT9V03X_H][MT9V03X_W];
@@ -94,7 +101,7 @@ static track_vision_result_t track_result;
 
 // 冻结一帧快照，由 UART 中断慢慢发送。传输中不覆盖，忙时跳过新预览帧。
 // 数据头及诊断文本也纳入同一队列，禁止 printf 插入正在发送的图像。
-#define CAMERA_DIAGNOSTIC_SIZE 512U
+#define CAMERA_DIAGNOSTIC_SIZE 768U
 static uint8_t camera_tx_packet[CAMERA_DIAGNOSTIC_SIZE + 12U + sizeof(image)];
 static volatile uint32_t camera_tx_position;
 static volatile uint32_t camera_tx_length;
@@ -173,22 +180,41 @@ static void assistant_send_image(void)
     float snapshot_target = speed_target;
     float snapshot_left_speed = speed_real_l, snapshot_right_speed = speed_real_r;
     float snapshot_left_pwm = speed_pwm_l, snapshot_right_pwm = speed_pwm_r;
+    imu_navigation_state_t snapshot_imu = imu_navigation;
+    ring_control_state_t snapshot_ring = ring_control;
+    uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.2.1 T=%lu CAP=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu\r\n",
+        "#CAM FW=0.3.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
-        (unsigned long)processed_frames, (unsigned long)displayed_frames,
+        (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
+        (unsigned long)displayed_frames,
         (unsigned long)capture_fps, (unsigned long)process_fps, (unsigned long)display_fps,
         (unsigned int)screen_enabled, (unsigned int)snapshot_running, (unsigned int)snapshot_fault,
         (unsigned int)snapshot_protection, (unsigned int)snapshot_full_speed,
         CAMERA_TUNING_EXPOSURE, (unsigned int)camera_exposure_status,
         (unsigned int)track_result.valid, (unsigned int)track_result.confidence,
+        (unsigned int)track_result.valid_rows, (unsigned int)track_result.roi_rows,
+        (unsigned int)track_result.near_valid_rows, (unsigned int)track_result.far_valid_rows,
+        (unsigned int)track_result.near_width, (unsigned int)track_result.far_width,
+        (unsigned int)track_result.width_growth_percent,
+        (unsigned int)track_result.ring_candidate, (int)track_result.ring_direction,
+        (unsigned int)track_result.reject_flags, (unsigned int)track_result.no_candidate_rows,
+        (unsigned int)track_result.ambiguous_rows, (unsigned int)track_result.disconnected_rows,
         (int)track_result.error, (int)track_result.heading, (unsigned int)snapshot_ready,
         (unsigned int)snapshot_stop, (int)snapshot_servo, (int)(snapshot_target * 10.0f),
         (int)snapshot_left_speed, (int)snapshot_right_speed,
         (unsigned int)snapshot_left_pwm, (unsigned int)snapshot_right_pwm,
         (unsigned int)camera_threshold,
-        (unsigned long)invalid_vision_frames);
+        (unsigned long)invalid_vision_frames,
+        (unsigned int)snapshot_imu_status, (unsigned int)imu660rb_last_identity(),
+        (unsigned long)snapshot_imu.sample_count,
+        (unsigned int)snapshot_imu.bias_ready, (unsigned int)snapshot_imu.bias_samples,
+        (int)snapshot_imu.acc_forward, (int)snapshot_imu.acc_left,
+        (int)snapshot_imu.acc_up, (int)snapshot_imu.gyro_y_raw,
+        (int)(snapshot_imu.yaw_rate_dps * 10.0f),
+        (unsigned int)snapshot_ring.phase, (int)snapshot_ring.direction,
+        (int)(snapshot_ring.yaw_progress_deg * 10.0f));
     if (prefix_length <= 0 || (uint32_t)prefix_length >= CAMERA_DIAGNOSTIC_SIZE)
         return;
     memcpy(camera_tx_packet + prefix_length, header, sizeof(header));
@@ -267,7 +293,29 @@ static void update_frame_rates(uint32_t now)
 static void screen_draw_stats(void)
 {
     char line[17];
-#if SERVO_CENTER_TEST_MODE
+#if IMU_AXIS_TEST_MODE
+    if (imu_device_status != IMU660RB_RESULT_OK)
+    {
+        tft180_show_string(0, 102, "IMU660RB ERROR  ");
+        snprintf(line, sizeof(line), "ID:%02X STATUS:%u ",
+                 (unsigned int)imu660rb_last_identity(),
+                 (unsigned int)imu_device_status);
+        tft180_show_string(0, 118, line);
+        tft180_show_string(0, 134, "CHECK IMU WIRE  ");
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "X A%5d G%5d", (int)imu_navigation.acc_left,
+                 (int)imu_navigation.gyro_x_raw);
+        tft180_show_string(0, 102, line);
+        snprintf(line, sizeof(line), "Y A%5d G%5d", (int)-imu_navigation.acc_up,
+                 (int)imu_navigation.gyro_y_raw);
+        tft180_show_string(0, 118, line);
+        snprintf(line, sizeof(line), "Z A%5d G%5d", (int)-imu_navigation.acc_forward,
+                 (int)imu_navigation.gyro_z_raw);
+        tft180_show_string(0, 134, line);
+    }
+#elif SERVO_CENTER_TEST_MODE
     const int16_t middle = track_servo_tenths;
     snprintf(line, sizeof(line), "MID:%3d.%1d DEG", (int)(middle / 10),
              (int)(middle >= 0 ? middle % 10 : -(middle % 10)));
@@ -275,11 +323,18 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 118, "C12-  C15+     ");
     tft180_show_string(0, 134, motor_enabled ? "C13 SERVO ON  " : "C13 SERVO OFF ");
 #else
-    snprintf(line, sizeof(line), "H:%5d S:%4d", (int)track_result.heading,
-             (int)track_servo_tenths);
+    snprintf(line, sizeof(line), "E:%4d H:%4d", (int)track_result.error,
+             (int)track_result.heading);
     tft180_show_string(0, 102, line);
-    snprintf(line, sizeof(line), "E:%5d Q:%3u ", (int)track_result.error,
-             (unsigned int)track_result.confidence);
+    uint32_t primask = interrupt_global_disable();
+    uint8_t ring_phase = ring_control.phase;
+    float ring_yaw = ring_control.yaw_progress_deg;
+    interrupt_global_enable(primask);
+    snprintf(line, sizeof(line), "Q%3u R%u C%u Y%3d",
+             (unsigned int)track_result.confidence,
+             (unsigned int)ring_phase,
+             (unsigned int)track_result.ring_candidate,
+             (int)ring_yaw);
     tft180_show_string(0, 118, line);
     if (motor_feedback_fault)
     {
@@ -439,6 +494,7 @@ int main(void)
             binaryzation_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, threshold);
             // 在叠加调试线之前识别赛道，并将一帧完整结果交给控制中断。
             track_vision_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, &track_result);
+            track_result.frame_number = frame_number;
             if (!track_result.valid)
                 ++invalid_vision_frames;
             track_frame_publish(&track_result);
@@ -449,8 +505,9 @@ int main(void)
                                        TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT);
                 screen_draw_track_overlay();
                 ++displayed_frames;
-                if (screen_stats_dirty)
-                    screen_draw_stats();
+                // 图像、边线与诊断全部读取刚完成的 track_result，禁止跨帧混看。
+                screen_stats_dirty = 1U;
+                screen_draw_stats();
             }
             ++processed_frames;
 

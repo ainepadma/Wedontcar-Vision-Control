@@ -414,6 +414,16 @@
               <FileType>1</FileType>
               <FilePath>..\user\src\track_control.c</FilePath>
             </File>
+            <File>
+              <FileName>imu_navigation.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\imu_navigation.c</FilePath>
+            </File>
+            <File>
+              <FileName>ring_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\ring_control.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -801,6 +811,16 @@
               <FileName>zf_device_imu660ra.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\..\libraries\zf_device\zf_device_imu660ra.h</FilePath>
+            </File>
+            <File>
+              <FileName>zf_device_imu660rb.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\libraries\zf_device\zf_device_imu660rb.c</FilePath>
+            </File>
+            <File>
+              <FileName>zf_device_imu660rb.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\..\libraries\zf_device\zf_device_imu660rb.h</FilePath>
             </File>
             <File>
               <FileName>zf_device_ips114.c</FileName>

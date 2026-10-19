@@ -30,11 +30,16 @@ static uint8_t process(uint16_t rows, uint16_t cols)
 static void draw_gray_lane(uint16_t rows, uint16_t cols, int mode)
 {
     uint32_t rng = 1327U;
+    const uint16_t roi_start = (uint16_t)((uint32_t)rows *
+        TRACK_VISION_ROI_START_PERCENT / 100U);
+    const uint16_t roi_end = (uint16_t)((uint32_t)rows *
+        TRACK_VISION_ROI_END_PERCENT / 100U);
+    const uint16_t zone_rows = (uint16_t)((roi_end - roi_start) / 3U);
     for (uint16_t y = 0; y < rows; ++y) {
         for (uint16_t x = 0; x < cols; ++x) {
             int white = x >= cols / 3U && x < cols * 2U / 3U;
-            if (mode == 1 && y >= rows * 2U / 3U) white = 0;
-            if (mode == 2 && y < rows * 3U / 5U) white = 0;
+            if (mode == 1 && y >= roi_end - zone_rows && y < roi_end) white = 0;
+            if (mode == 2 && y >= roi_start && y < roi_start + zone_rows) white = 0;
             if (mode == 3) white = x < cols / 2U;
             rng = rng * 1664525U + 1013904223U;
             pixels[(uint32_t)y * cols + x] =
@@ -56,13 +61,15 @@ static void synthetic(uint16_t rows, uint16_t cols)
     process(rows, cols);
     CHECK(result.valid && result.confidence >= 95U && abs(result.error) < 20);
 
-    // The user confirmed this excluded near-field region contains the car body.
-    // Occlusion inside the active near/far zones is still rejected below.
+    // The user confirmed that the fixed body starts around 70%H. The calibrated
+    // 68%H lower ROI bound must exclude it without inventing hidden track pixels.
     draw_gray_lane(rows, cols, 0);
-    for (uint16_t y = (uint16_t)((uint32_t)rows * 85U / 100U); y < rows; ++y)
+    for (uint16_t y = (uint16_t)((uint32_t)rows * 70U / 100U); y < rows; ++y)
         memset(pixels + (uint32_t)y * cols + cols / 3U, 0, cols / 3U);
     process(rows, cols);
     CHECK(result.valid && abs(result.error) < 20);
+    CHECK(result.confidence == 100U);
+    CHECK(result.reject_flags == TRACK_VISION_REJECT_NONE);
 
     // A three-frame observation only arms readiness; it must not start motors.
     track_control_state_t control;
@@ -104,7 +111,7 @@ static void synthetic(uint16_t rows, uint16_t cols)
         process(rows, cols);
         CHECK(!result.valid);
     }
-    printf("PASS gray pipeline %ux%u: noise, uniform, missing near/far, clipped edge, manual/LOST gate\n",
+    printf("PASS gray pipeline %ux%u: noise, body mask, missing near/far, clipped edge, manual/LOST gate\n",
            (unsigned int)cols, (unsigned int)rows);
 }
 
