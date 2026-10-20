@@ -54,6 +54,7 @@ int main(void)
         ring_control_observe(&state, 0U, 0, 1U, 90U, now);
     ring_control_tick(&state, 1U, 1U, 100.0f, now + 10U);
     CHECK(state.phase == RING_STATE_EXITING);
+    // 收到清晰赛道帧后，达到最短出环时间即可退出特殊转向。
     ring_control_tick(&state, 1U, 1U, 100.0f, now + RING_EXIT_MIN_MS);
     CHECK(state.phase == RING_STATE_COOLDOWN);
     ring_control_tick(&state, 0U, 1U, 0.0f, now + RING_EXIT_MIN_MS + 10U);
@@ -69,11 +70,19 @@ int main(void)
         ring_control_tick(&state, 1U, 1U, -100.0f, 3030U + i * 10U);
     CHECK(state.phase == RING_STATE_INSIDE);
     now = 3070U;
+    uint8_t saw_vision_handoff = 0U;
     for (uint32_t i = 0; i < 500U && state.phase != RING_STATE_COOLDOWN; ++i)
     {
         now += 10U;
         ring_control_tick(&state, 1U, 1U, -100.0f, now);
+        if (state.phase == RING_STATE_EXITING &&
+            (uint32_t)(now - state.phase_started_ms) >= RING_EXIT_OVERRIDE_MS)
+        {
+            CHECK(ring_control_turn_override(&state) == 0);
+            saw_vision_handoff = 1U;
+        }
     }
+    CHECK(saw_vision_handoff);
     CHECK(state.yaw_progress_deg >= RING_MAX_EXIT_DEG);
     CHECK(state.phase == RING_STATE_COOLDOWN);
     CHECK(ring_control_turn_override(&state) == 0);

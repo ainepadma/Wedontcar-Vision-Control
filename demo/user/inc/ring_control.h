@@ -13,6 +13,8 @@
 #define RING_ACTIVE_TIMEOUT_MS 12000U
 #define RING_EXIT_TIMEOUT_MS 2500U
 #define RING_EXIT_MIN_MS 150U
+/* 出环强制反打仅作短时过渡；随后交回视觉中线，即使画面仍像环岛。 */
+#define RING_EXIT_OVERRIDE_MS 150U
 #define RING_EARLY_REVERSE_DEG 45.0f
 #define RING_COOLDOWN_MS 3000U
 

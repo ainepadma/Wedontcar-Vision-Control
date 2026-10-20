@@ -7,7 +7,13 @@
 #define TRACK_READY_FRAMES 3U
 #define TRACK_MIN_CONFIDENCE 45U
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
-#define TRACK_HEADING_WEIGHT 1.50
+#define TRACK_HEADING_WEIGHT 3.00
+/* 出弯偏离中线较远时，前瞻方向和微分项都不能反向压过回中指令。 */
+#define TRACK_RECENTER_BLEND_START 80.0
+#define TRACK_RECENTER_BLEND_END 160.0
+#define TRACK_OPPOSING_HEADING_FRACTION 0.25
+#define TRACK_OPPOSING_DERIVATIVE_FRACTION 0.25
+#define TRACK_RECENTER_SPEED_ERROR 350.0
 
 static double track_clamp(double value, double low, double high)
 {
@@ -244,21 +250,39 @@ track_control_output_t track_control_tick(track_control_state_t *state,
         }
         else if (state->frame_valid)
         {
-            /* Curve-centre placement can produce a small cross-track error with a
-             * large look-ahead heading. Let heading dominate in that case so the
-             * car turns into the bend instead of continuing almost straight. */
-            double mixed_error = track_clamp((double)state->filtered_error +
-                                            TRACK_HEADING_WEIGHT * state->filtered_heading,
-                                            -1000.0, 1000.0);
-            double correction = (double)cfg->kp * mixed_error +
-                                (double)cfg->kd * state->derivative;
+            /* 近端偏差表示车身横向位置，不能被远端道路方向抵消。
+             * 小偏差仍允许前瞻项主导入弯；明显偏离时先向中线回正。 */
+            double lateral = (double)state->filtered_error;
+            double heading = TRACK_HEADING_WEIGHT * (double)state->filtered_heading;
+            double recenter = track_clamp((fabs(lateral) - TRACK_RECENTER_BLEND_START) /
+                (TRACK_RECENTER_BLEND_END - TRACK_RECENTER_BLEND_START), 0.0, 1.0);
+            if (recenter > 0.0 && lateral * heading < 0.0)
+            {
+                double limited_heading = track_clamp(heading,
+                    -TRACK_OPPOSING_HEADING_FRACTION * fabs(lateral),
+                     TRACK_OPPOSING_HEADING_FRACTION * fabs(lateral));
+                heading += recenter * (limited_heading - heading);
+            }
+            double mixed_error = track_clamp(lateral + heading, -1000.0, 1000.0);
+            double proportional = (double)cfg->kp * mixed_error;
+            double derivative = (double)cfg->kd * state->derivative;
+            if (recenter > 0.0 && proportional * derivative < 0.0)
+            {
+                double limited_derivative = track_clamp(derivative,
+                    -TRACK_OPPOSING_DERIVATIVE_FRACTION * fabs(proportional),
+                     TRACK_OPPOSING_DERIVATIVE_FRACTION * fabs(proportional));
+                derivative += recenter * (limited_derivative - derivative);
+            }
+            double correction = proportional + derivative;
             double endpoint = correction >= 0.0 ? cfg->servo_right : cfg->servo_left;
             double span = fabs(endpoint - cfg->servo_center);
             double offset = fmin(fabs(correction), span);
             double desired = cfg->servo_center +
                              (endpoint >= cfg->servo_center ? offset : -offset);
             double max_step = (double)cfg->max_servo_rate_deg_s * elapsed / 1000.0;
-            double severity = fmax(fabs((double)state->filtered_error) / 600.0,
+            /* 车仍偏在边线附近时维持弯道低速，给横向回中留出距离。 */
+            double severity = fmax(fabs((double)state->filtered_error) /
+                                   TRACK_RECENTER_SPEED_ERROR,
                                    fabs((double)state->filtered_heading) / 500.0);
             severity = fmax(severity, span > 0.0 ? offset / span : 0.0);
             severity = track_clamp(severity, 0.0, 1.0);

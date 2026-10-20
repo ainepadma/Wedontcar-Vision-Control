@@ -225,7 +225,9 @@ int8_t ring_control_turn_override(const ring_control_state_t *state)
 {
     if (state == NULL)
         return 0;
-    if (state->phase == RING_STATE_EXITING)
+    if (state->phase == RING_STATE_EXITING &&
+        (uint32_t)(state->last_tick_ms - state->phase_started_ms) <
+            RING_EXIT_OVERRIDE_MS)
         return state->direction > 0 ? -1 : (state->direction < 0 ? 1 : 0);
     return 0;
 }

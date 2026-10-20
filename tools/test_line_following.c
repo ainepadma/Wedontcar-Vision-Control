@@ -216,6 +216,27 @@ static void draw_lane(uint8_t *image, uint16_t rows, uint16_t cols, int32_t bend
     }
 }
 
+static void draw_offset_cross_entry(uint8_t *image, uint16_t rows,
+                                    uint16_t cols, int32_t offset)
+{
+    memset(image, 0, (size_t)rows * cols);
+    const uint16_t first = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_START_PERCENT / 100U);
+    const uint16_t end = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U);
+    const uint16_t zone = (end - first) / 3U;
+    const int32_t width = cols / 3;
+    for (uint16_t y = first; y < end; ++y)
+    {
+        if (y < first + zone)
+            memset(image + (uint32_t)y * cols, 255, cols);
+        else
+        {
+            const int32_t left = (int32_t)cols / 2 + offset - width / 2;
+            CHECK(left > 0 && left + width < cols);
+            memset(image + (uint32_t)y * cols + (uint32_t)left, 255, (size_t)width);
+        }
+    }
+}
+
 static void prepare_running(simulation_t *sim, const uint8_t *image)
 {
     /* 20 ms and 40 ms publish two valid frames; a third arrives at 60 ms. */
@@ -306,6 +327,29 @@ static void test_curve(simulation_t *sim, uint8_t *image, int direction)
     CHECK(fabsf(sim->output.servo_angle - center) > 0.5f);
     CHECK(sim->output.target_speed >= sim->control.config.speed_curve_min);
     CHECK(sim->output.target_speed < sim->control.config.speed_straight - 0.5f);
+}
+
+static void test_bend_to_cross_recenter(simulation_t *sim, uint8_t *image)
+{
+    draw_lane(image, sim->rows, sim->cols, -(int32_t)(sim->cols / 8U));
+    sim->control.config.max_servo_rate_deg_s = 200.0f;
+    prepare_running(sim, image);
+    advance(sim, image, 1U, 30U);
+    CHECK(sim->output.servo_angle > sim->control.config.servo_center);
+
+    /* 左弯后的十字入口：近端赛道偏右，远端横向白区不能延续左打。 */
+    draw_offset_cross_entry(image, sim->rows, sim->cols,
+                            (int32_t)(sim->cols / 8U));
+    advance(sim, image, 1U, 20U);
+    CHECK(sim->vision.valid && sim->vision.cross_candidate);
+    CHECK(sim->output.running && sim->output.ready);
+    CHECK(sim->output.servo_angle < sim->control.config.servo_center);
+    CHECK(sim->output.target_speed < sim->control.config.speed_straight);
+
+    draw_lane(image, sim->rows, sim->cols, 0);
+    advance(sim, image, 1U, 50U);
+    CHECK(sim->vision.valid && !sim->vision.cross_candidate);
+    CHECK(fabsf(sim->output.servo_angle - sim->control.config.servo_center) < 0.2f);
 }
 
 static void test_loss(simulation_t *sim, uint8_t *image)
@@ -561,6 +605,8 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     test_curve(&sim, image, 1);
     simulation_init(&sim, rows, cols);
     test_curve(&sim, image, -1);
+    simulation_init(&sim, rows, cols);
+    test_bend_to_cross_recenter(&sim, image);
     simulation_init(&sim, rows, cols);
     test_loss(&sim, image);
     simulation_init(&sim, rows, cols);

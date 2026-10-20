@@ -45,6 +45,7 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     const uint16_t zone_rows = track_max(1U, roi_rows / 3U);
     const uint16_t near_start = roi_end - zone_rows;
     const uint16_t far_end = roi_start + zone_rows;
+    const uint16_t anchor_start = roi_end - track_max(3U, roi_rows / 6U);
     const uint16_t minimum_width = track_max(6U, cols / 16U);
     const uint16_t maximum_width = (uint16_t)((uint32_t)cols * 4U / 5U);
     // 弯道允许每行中线移动约 2.1%W，并跨过约 4.2%H 的短暂缺口；
@@ -53,18 +54,20 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     const uint16_t maximum_missing_rows = track_max(2U, rows / 24U);
 
     uint16_t previous_row = 0;
+    uint16_t seed_row = 0;
     uint16_t previous_left = 0;
     uint16_t previous_right = 0;
     uint16_t previous_center = 0;
     uint8_t have_previous = 0;
     uint16_t near_count = 0;
+    uint16_t mid_count = 0;
     uint16_t far_count = 0;
     uint32_t near_sum = 0;
+    uint32_t mid_sum = 0;
     uint32_t far_sum = 0;
     uint32_t near_width_sum = 0;
     uint32_t far_width_sum = 0;
-    uint32_t weighted_sum = 0;
-    uint32_t weight_total = 0;
+    uint16_t broad_rows = 0;
     out->roi_rows = roi_rows;
 
     for (uint16_t next_row = roi_end; next_row > roi_start; --next_row)
@@ -111,6 +114,12 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
             }
 
             const uint16_t width = end - start + 1U;
+            /* 十字横向白区会跨过图像两侧；先记录，再按普通双边界规则
+             * 拒绝该行，避免把宽白区本身误当作赛道中线。 */
+            if (start <= cols / 8U && end >= cols - 1U - cols / 8U &&
+                (uint32_t)width * 5U >= (uint32_t)cols * 4U &&
+                (uint32_t)white_pixels * 4U >= (uint32_t)width * 3U)
+                ++broad_rows;
             if (start == 0U || end == cols - 1U ||
                 width < minimum_width || width > maximum_width ||
                 (uint32_t)white_pixels * 4U < (uint32_t)width * 3U)
@@ -178,25 +187,27 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
         previous_left = best_left;
         previous_right = best_right;
         previous_center = best_center;
+        if (!have_previous)
+            seed_row = row;
         have_previous = 1U;
 
-        uint16_t weight = 2U;
         if (row >= near_start)
         {
             ++near_count;
             near_sum += best_center;
             near_width_sum += best_right - best_left + 1U;
-            weight = 3U;
         }
         else if (row < far_end)
         {
             ++far_count;
             far_sum += best_center;
             far_width_sum += best_right - best_left + 1U;
-            weight = 1U;
         }
-        weighted_sum += (uint32_t)best_center * weight;
-        weight_total += weight;
+        else
+        {
+            ++mid_count;
+            mid_sum += best_center;
+        }
     }
 
     out->near_valid_rows = near_count;
@@ -235,20 +246,133 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     out->confidence = (uint8_t)((uint32_t)out->valid_rows * 100U / roi_rows);
     if (!have_previous)
         out->reject_flags |= TRACK_VISION_REJECT_NO_SEED;
+    else if (seed_row < anchor_start)
+        out->reject_flags |= TRACK_VISION_REJECT_NEAR_ANCHOR;
     if ((uint32_t)out->valid_rows * 100U < (uint32_t)roi_rows * 45U)
         out->reject_flags |= TRACK_VISION_REJECT_TOTAL_COVERAGE;
     if ((uint32_t)near_count * 100U < (uint32_t)zone_rows * 45U)
         out->reject_flags |= TRACK_VISION_REJECT_NEAR_COVERAGE;
     if ((uint32_t)far_count * 100U < (uint32_t)zone_rows * 45U)
         out->reject_flags |= TRACK_VISION_REJECT_FAR_COVERAGE;
+    /* 仅在连续宽白区且近端单赛道仍完整时允许十字入口回中。
+     * 普通丢线、单行白光、全白图以及无近端种子仍保持无效。 */
+    if (broad_rows >= track_max(3U, roi_rows / 12U) &&
+        (uint32_t)near_count * 100U >= (uint32_t)zone_rows * 70U &&
+        (out->reject_flags & TRACK_VISION_REJECT_NEAR_ANCHOR) == 0U &&
+        (out->reject_flags & TRACK_VISION_REJECT_FAR_COVERAGE) != 0U)
+    {
+        out->cross_candidate = 1U;
+        out->ring_candidate = 0U;
+        out->ring_direction = 0;
+        out->reject_flags = TRACK_VISION_REJECT_NONE;
+        out->valid = 1U;
+        out->confidence = (uint8_t)((uint32_t)near_count * 100U / zone_rows);
+        out->error = track_clamp_error(
+            ((int64_t)2 * near_sum - (int64_t)(cols - 1U) * near_count) * 1000 /
+            ((int64_t)(cols - 1U) * near_count));
+        out->heading = 0;
+        return;
+    }
     if (out->reject_flags != TRACK_VISION_REJECT_NONE)
         return;
 
     out->valid = 1U;
+    /* 横向偏差只取车前最近的有效区域；整段平均可能在出弯时抵消
+     * 车身旁的明显偏移，使车沿边线平行行驶而不主动回中。 */
     out->error = track_clamp_error(
-        ((int64_t)2 * weighted_sum - (int64_t)(cols - 1U) * weight_total) * 1000 /
-        ((int64_t)(cols - 1U) * weight_total));
+        ((int64_t)2 * near_sum - (int64_t)(cols - 1U) * near_count) * 1000 /
+        ((int64_t)(cols - 1U) * near_count));
+    /* 远端可能是环岛另一段白轨。远端偏移不得突然超过近—中段
+     * 已验证的走势；真正的急弯仍可由连续近端帧逐步跟踪。 */
+    const int32_t near_center = (int32_t)(near_sum / near_count);
+    const int32_t mid_center = mid_count != 0U ?
+        (int32_t)(mid_sum / mid_count) : near_center;
+    const int32_t far_center = (int32_t)(far_sum / far_count);
+    const int32_t local_step = mid_center - near_center;
+    const int32_t far_limit = 2 * (local_step < 0 ? -local_step : local_step) +
+                              (int32_t)track_max(2U, cols / 16U);
+    int32_t far_step = far_center - mid_center;
+    if (far_step > far_limit)
+        far_step = far_limit;
+    else if (far_step < -far_limit)
+        far_step = -far_limit;
     out->heading = track_clamp_error(
-        ((int64_t)far_sum * near_count - (int64_t)near_sum * far_count) * 2000 /
-        ((int64_t)near_count * far_count * (cols - 1U)));
+        (int64_t)(mid_center + far_step - near_center) * 2000 / (cols - 1U));
+}
+
+void track_vision_lock_init(track_vision_lock_t *lock)
+{
+    if (lock != NULL)
+        memset(lock, 0, sizeof(*lock));
+}
+
+static void track_vision_reject_jump(track_vision_result_t *result)
+{
+    result->valid = 0U;
+    result->reject_flags |= TRACK_VISION_REJECT_TRACK_JUMP;
+    result->error = 0;
+    result->heading = 0;
+    result->ring_candidate = 0U;
+    result->cross_candidate = 0U;
+    result->ring_direction = 0;
+}
+
+void track_vision_lock_update(track_vision_lock_t *lock,
+                              track_vision_result_t *result)
+{
+    if (lock == NULL || result == NULL)
+        return;
+    if (!result->valid)
+    {
+        if (lock->missing_frames < UINT8_MAX)
+            ++lock->missing_frames;
+        lock->candidate_frames = 0U;
+        if (lock->missing_frames >= 5U)
+        {
+            lock->phase = TRACK_VISION_SEARCHING;
+            lock->has_lock = 0U;
+        }
+        return;
+    }
+    lock->missing_frames = 0U;
+    const int32_t error = result->error;
+    const int32_t locked_delta = error - lock->locked_error;
+    const int32_t locked_distance = locked_delta < 0 ? -locked_delta : locked_delta;
+    if (lock->phase == TRACK_VISION_LOCKED && locked_distance <= 400)
+    {
+        lock->locked_error = result->error;
+        return;
+    }
+    if (lock->phase == TRACK_VISION_SUSPECT && lock->has_lock &&
+        locked_distance <= 400)
+    {
+        lock->phase = TRACK_VISION_LOCKED;
+        lock->candidate_frames = 0U;
+        lock->locked_error = result->error;
+        return;
+    }
+    if (lock->phase != TRACK_VISION_SUSPECT)
+    {
+        lock->phase = TRACK_VISION_SUSPECT;
+        lock->candidate_error = result->error;
+        lock->candidate_frames = 1U;
+    }
+    else
+    {
+        const int32_t candidate_delta = error - lock->candidate_error;
+        if (candidate_delta < -150 || candidate_delta > 150)
+            lock->candidate_frames = 1U;
+        else if (lock->candidate_frames < 3U)
+            ++lock->candidate_frames;
+        lock->candidate_error = result->error;
+    }
+    if (lock->candidate_frames >= 3U)
+    {
+        lock->phase = TRACK_VISION_LOCKED;
+        lock->locked_error = result->error;
+        lock->has_lock = 1U;
+        lock->candidate_frames = 0U;
+        return;
+    }
+    track_vision_reject_jump(result);
 }

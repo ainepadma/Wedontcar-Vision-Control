@@ -52,6 +52,7 @@ static void verify(const uint8_t *image, uint16_t rows, uint16_t cols,
     CHECK(guarded->result.near_width <= cols);
     CHECK(guarded->result.far_width <= cols);
     CHECK(guarded->result.ring_candidate <= 1U);
+    CHECK(guarded->result.cross_candidate <= 1U);
     CHECK(guarded->result.ring_direction >= -1 &&
           guarded->result.ring_direction <= 1);
     uint16_t valid_rows = 0;
@@ -170,12 +171,43 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     CHECK(result->valid && result->error < -200 && result->error > -300);
     CHECK(result->heading == 0);
 
+    // 近端最靠车的一段丢失，但远处仍有完整白轨：不得从远处重新起线。
+    draw_lane(image, rows, cols, 0, 0);
+    const uint16_t blank_bottom = (uint16_t)(roi_rows / 6U + 1U);
+    memset(image + (uint32_t)(roi_end - blank_bottom) * cols, 0,
+           (size_t)blank_bottom * cols);
+    verify(image, rows, cols, &guarded);
+    CHECK(!result->valid);
+    CHECK((result->reject_flags & TRACK_VISION_REJECT_NEAR_ANCHOR) != 0U);
+    CHECK(result->near_valid_rows * 100U >= zone_rows * 45U);
+
+    // 仅远处突然转向时，远端方向不能像相连近端弯道一样拉动舵机。
+    draw_lane(image, rows, cols, 0, 0);
+    for (uint16_t y = roi_start; y < roi_start + zone_rows; ++y)
+    {
+        const int32_t shift = (int32_t)(cols / 6U) *
+            (int32_t)(roi_start + zone_rows - 1U - y) / (int32_t)zone_rows;
+        const int32_t left = (int32_t)(cols / 2U) + shift - (int32_t)(cols / 6U);
+        memset(image + (uint32_t)y * cols, 0, cols);
+        memset(image + (uint32_t)y * cols + left, 255, cols / 3U);
+    }
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->heading > 0 && result->heading < 140);
+
     draw_lane(image, rows, cols, 0, cols / 8);
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->heading > 90 && result->error > 0);
     draw_lane(image, rows, cols, 0, -(int32_t)(cols / 8));
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->heading < -90 && result->error < 0);
+
+    // 近端在车身右侧、远端却弯向左侧：横向偏差仍必须反映近端位置。
+    draw_lane(image, rows, cols, cols / 8, -(int32_t)(cols / 4));
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->error > 100 && result->heading < -300);
+    draw_lane(image, rows, cols, -(int32_t)(cols / 8), cols / 4);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->error < -100 && result->heading > 300);
 
     // Constant-width curves are ordinary track, not ring entrances.
     CHECK(!result->ring_candidate);
@@ -243,6 +275,29 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     for (uint16_t y = roi_start; y < fork_row; ++y)
         CHECK(!result->row_valid[y]);
 
+    // 十字入口远端变成宽白区时，仍应凭近端赛道回中，而非保持旧转向。
+    for (int sign = -1; sign <= 1; sign += 2)
+    {
+        draw_lane(image, rows, cols, sign * (int32_t)(cols / 8U), 0);
+        for (uint16_t y = roi_start; y < roi_start + zone_rows; ++y)
+            memset(image + (uint32_t)y * cols, 255, cols);
+        verify(image, rows, cols, &guarded);
+        CHECK(result->valid && result->cross_candidate && !result->ring_candidate);
+        CHECK(result->heading == 0);
+        CHECK(sign > 0 ? result->error > 200 : result->error < -200);
+        CHECK(result->near_valid_rows == zone_rows);
+        for (uint16_t y = roi_start; y < roi_start + zone_rows; ++y)
+            CHECK(!result->row_valid[y]);
+    }
+    // 单行强反光及整幅全白不能被认成十字入口。
+    draw_lane(image, rows, cols, 0, 0);
+    memset(image + (uint32_t)roi_start * cols, 255, cols);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && !result->cross_candidate);
+    memset(image, 255, count);
+    verify(image, rows, cols, &guarded);
+    CHECK(!result->valid && !result->cross_candidate);
+
     // Missing far/near thirds invalidate output even if 2/3 of ROI remains.
     draw_lane(image, rows, cols, 0, 0);
     memset(image + (uint32_t)roi_start * cols, 0, (size_t)zone_rows * cols);
@@ -304,6 +359,46 @@ static void test_resolution(uint16_t rows, uint16_t cols)
            (unsigned int)cols, (unsigned int)rows);
 }
 
+static void test_temporal_lock(void)
+{
+    const uint16_t rows = 240U, cols = 376U;
+    uint8_t *image = malloc((size_t)rows * cols);
+    CHECK(image != NULL);
+    guarded_result_t guarded;
+    track_vision_lock_t lock;
+    track_vision_lock_init(&lock);
+    draw_lane(image, rows, cols, 0, 0);
+    for (unsigned int frame = 0U; frame < 3U; ++frame)
+    {
+        verify(image, rows, cols, &guarded);
+        track_vision_lock_update(&lock, &guarded.result);
+        CHECK(guarded.result.valid == (frame == 2U));
+    }
+    CHECK(lock.phase == TRACK_VISION_LOCKED);
+    draw_lane(image, rows, cols, cols / 4U, 0);
+    verify(image, rows, cols, &guarded);
+    track_vision_lock_update(&lock, &guarded.result);
+    CHECK(!guarded.result.valid && guarded.result.error == 0);
+    CHECK((guarded.result.reject_flags & TRACK_VISION_REJECT_TRACK_JUMP) != 0U);
+    CHECK(!guarded.result.ring_candidate);
+    // 单帧远处白轨消失后，应立即重新锁回原近端赛道。
+    draw_lane(image, rows, cols, 0, 0);
+    verify(image, rows, cols, &guarded);
+    track_vision_lock_update(&lock, &guarded.result);
+    CHECK(guarded.result.valid && lock.phase == TRACK_VISION_LOCKED);
+    // 真实换线须稳定三帧才可接受，不会因一个误识别帧转向。
+    draw_lane(image, rows, cols, cols / 4U, 0);
+    for (unsigned int frame = 0U; frame < 3U; ++frame)
+    {
+        verify(image, rows, cols, &guarded);
+        track_vision_lock_update(&lock, &guarded.result);
+        CHECK(guarded.result.valid == (frame == 2U));
+    }
+    CHECK(lock.phase == TRACK_VISION_LOCKED && guarded.result.error > 400);
+    free(image);
+    puts("PASS near-anchor and temporal-lock state machine");
+}
+
 static void test_invalid_dimensions(void)
 {
     guarded_result_t guarded;
@@ -334,6 +429,7 @@ static void test_invalid_dimensions(void)
 int main(void)
 {
     test_invalid_dimensions();
+    test_temporal_lock();
     test_resolution(120, 188);
     test_resolution(240, 376);
     test_resolution(480, 752);

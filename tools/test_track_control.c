@@ -169,6 +169,54 @@ static void test_steering_and_speed(void)
     puts("PASS semantic steering direction, heading-dominant bends, endpoints, slew rate and slowdown");
 }
 
+static void test_exit_recenter_priority(void)
+{
+    for (int sign = -1; sign <= 1; sign += 2)
+    {
+        track_control_state_t state;
+        track_control_config_t tuning = config;
+        track_control_init(&state, &tuning);
+        qualify(&state, (int16_t)(sign * 450), (int16_t)(-sign * 600), 0U);
+        track_control_toggle(&state, 40U);
+        /* 极端反向微分也不能把出弯回中指令翻转。 */
+        state.derivative = (float)(-sign * 40000);
+        track_control_output_t output = track_control_tick(&state, 50U);
+        CHECK(output.running);
+        CHECK(sign > 0 ? output.servo_angle < tuning.servo_center
+                       : output.servo_angle > tuning.servo_center);
+        CHECK(output.target_speed < tuning.speed_straight);
+        CHECK(output.servo_angle >= tuning.servo_right &&
+              output.servo_angle <= tuning.servo_left);
+        for (uint32_t now = 60U; now <= 600U; now += 10U)
+        {
+            if (now % 20U == 0U)
+                track_control_observe(&state, 0, 0, 100U, 1U, now);
+            output = track_control_tick(&state, now);
+        }
+        CHECK(fabsf(output.servo_angle - tuning.servo_center) < 0.05f);
+    }
+    puts("PASS exit recenter outranks opposing heading on both sides");
+}
+
+static void test_moderate_offset_recenter(void)
+{
+    for (int sign = -1; sign <= 1; sign += 2)
+    {
+        track_control_state_t state;
+        track_control_config_t tuning = config;
+        tuning.max_servo_rate_deg_s = 200.0f;
+        track_control_init(&state, &tuning);
+        // 实车截图类似 E=160、H=-74：远端方向不能抵消横向回中。
+        qualify(&state, (int16_t)(sign * 160), (int16_t)(-sign * 74), 0U);
+        track_control_toggle(&state, 40U);
+        track_control_output_t output = track_control_tick(&state, 50U);
+        CHECK(output.running && output.target_speed < tuning.speed_straight);
+        CHECK(sign > 0 ? output.servo_angle <= tuning.servo_center - 1.8f
+                       : output.servo_angle >= tuning.servo_center + 1.8f);
+    }
+    puts("PASS moderate lateral offset recenter despite opposing heading");
+}
+
 static void test_independent_servo_center(void)
 {
     track_control_state_t defaults;
@@ -584,6 +632,8 @@ int main(void)
     test_wheel_speed_differential();
     test_ring_turn_override();
     test_steering_and_speed();
+    test_exit_recenter_priority();
+    test_moderate_offset_recenter();
     test_independent_servo_center();
     test_loss_stale_and_encoder();
     test_default_speed_profile();

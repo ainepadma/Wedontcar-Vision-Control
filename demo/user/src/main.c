@@ -16,6 +16,7 @@ static uint32_t displayed_frames;
 static uint32_t capture_fps, process_fps, display_fps;
 static uint32_t invalid_vision_frames;
 static uint8_t camera_threshold;
+static track_vision_lock_t track_vision_lock;
 
 // *************************** 例程硬件连接说明 ***************************
 /*
@@ -84,6 +85,7 @@ void Init()
     // 电机上电保持零输出，必须先松开按键再有效按下才启动。
     gpio_init(MOTOR_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     gpio_init(SPEED_MODE_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
+    track_vision_lock_init(&track_vision_lock);
     track_runtime_init();
     pit_ms_init(PIT_CH0, SPEED_CONTROL_PERIOD_MS);
 
@@ -342,7 +344,11 @@ static void screen_draw_stats(void)
         tft180_show_string(0, 134, line);
     }
     else if (motor_enabled && !track_ready)
-        tft180_show_string(0, 134, "CAM WARN      ");
+        tft180_show_string(0, 134,
+            (track_result.reject_flags & TRACK_VISION_REJECT_NEAR_ANCHOR) ?
+                "NEAR LOST     " :
+            (track_result.reject_flags & TRACK_VISION_REJECT_TRACK_JUMP) ?
+                "TRACK JUMP    " : "CAM WARN      ");
     else if (motor_enabled && (!imu_navigation.device_ready ||
                                !imu_navigation.bias_ready))
         tft180_show_string(0, 134, "IMU WARN      ");
@@ -488,6 +494,7 @@ int main(void)
             binaryzation_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, threshold);
             // 在叠加调试线之前识别赛道，并将一帧完整结果交给控制中断。
             track_vision_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, &track_result);
+            track_vision_lock_update(&track_vision_lock, &track_result);
             track_result.frame_number = frame_number;
             if (!track_result.valid)
                 ++invalid_vision_frames;
