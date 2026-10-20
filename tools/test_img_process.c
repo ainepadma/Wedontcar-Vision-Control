@@ -262,10 +262,185 @@ static void test_mean_invalid_and_rounding(void)
     puts("PASS mean3x3 null/small/short/overlap rejection, no mutation, integer truncation");
 }
 
+static void test_low_dynamic_adaptive_threshold(void)
+{
+    uint8_t image[32];
+    for (uint16_t row = 0U; row < 4U; ++row) {
+        const uint8_t high = row < 2U ? 10U : 20U;
+        memset(image + (uint32_t)row * 8U, 0, 4U);
+        memset(image + (uint32_t)row * 8U + 4U, high, 4U);
+    }
+    uint32_t histogram[256];
+    CHECK(image_banded_percentile_stretch(image, 4U, 8U, 2U,
+                                           25U, 75U, histogram) == 1U);
+    for (uint16_t row = 0U; row < 4U; ++row) {
+        for (uint16_t col = 0U; col < 8U; ++col)
+            CHECK(image[(uint32_t)row * 8U + col] == (col < 4U ? 0U : 255U));
+    }
+    CHECK(image_banded_otsu_binary_offset(image, 4U, 8U, 2U,
+                                           12, histogram) == 12U);
+    for (uint16_t row = 0U; row < 4U; ++row) {
+        for (uint16_t col = 0U; col < 8U; ++col)
+            CHECK(image[(uint32_t)row * 8U + col] == (col < 4U ? 0U : 255U));
+    }
+    CHECK(image_banded_percentile_stretch(NULL, 4U, 8U, 2U,
+                                           1U, 99U, histogram) == 0U);
+    CHECK(image_banded_percentile_stretch(image, 4U, 8U, 2U,
+                                           99U, 1U, histogram) == 0U);
+    CHECK(image_banded_otsu_binary_offset(NULL, 4U, 8U, 2U,
+                                           0, histogram) == 0U);
+    puts("PASS low-dynamic band stretch and offset Otsu");
+}
+
+static void test_banded_stretch_has_no_horizontal_seams(void)
+{
+    enum { ROWS = 32, COLS = 64 };
+    uint8_t image[ROWS * COLS];
+    uint32_t histogram[256];
+    for (uint16_t row = 0U; row < ROWS; ++row)
+        for (uint16_t col = 0U; col < COLS; ++col)
+            image[(uint32_t)row * COLS + col] =
+                (uint8_t)(8U + row * 2U + col / 2U);
+
+    CHECK(image_banded_percentile_stretch(image, ROWS, COLS, 8U,
+                                           5U, 95U, histogram) == 1U);
+    for (uint16_t row = 8U; row < ROWS; row += 8U) {
+        uint32_t previous = 0U;
+        uint32_t current = 0U;
+        for (uint16_t col = 0U; col < COLS; ++col) {
+            previous += image[(uint32_t)(row - 1U) * COLS + col];
+            current += image[(uint32_t)row * COLS + col];
+        }
+        const uint32_t difference = previous > current ?
+            previous - current : current - previous;
+        CHECK(difference <= 6U * COLS);
+    }
+    puts("PASS band parameters interpolate across rows without horizontal seams");
+}
+
+static void test_vertical_median_rejects_row_impulses(void)
+{
+    enum { ROWS = 7, COLS = 8 };
+    uint8_t image[ROWS * COLS];
+    uint8_t scratch[2U * COLS];
+
+    for (uint16_t row = 0U; row < ROWS; ++row)
+        for (uint16_t col = 0U; col < COLS; ++col)
+            image[(uint32_t)row * COLS + col] = col < 3U ? 6U : 18U;
+    memset(image + 3U * COLS, 220, COLS);
+    CHECK(image_vertical_median3(image, ROWS, COLS, scratch,
+                                 sizeof(scratch)) == 1U);
+    for (uint16_t row = 0U; row < ROWS; ++row)
+        for (uint16_t col = 0U; col < COLS; ++col)
+            CHECK(image[(uint32_t)row * COLS + col] ==
+                  (col < 3U ? 6U : 18U));
+
+    memset(image, 180, sizeof(image));
+    memset(image + 3U * COLS, 0, COLS);
+    CHECK(image_vertical_median3(image, ROWS, COLS, scratch,
+                                 sizeof(scratch)) == 1U);
+    for (uint32_t index = 0U; index < sizeof(image); ++index)
+        CHECK(image[index] == 180U);
+
+    CHECK(image_vertical_median3(NULL, ROWS, COLS, scratch,
+                                 sizeof(scratch)) == 0U);
+    CHECK(image_vertical_median3(image, 2U, COLS, scratch,
+                                 sizeof(scratch)) == 0U);
+    CHECK(image_vertical_median3(image, ROWS, COLS, scratch,
+                                 sizeof(scratch) - 1U) == 0U);
+    CHECK(image_vertical_median3(image, ROWS, COLS, image,
+                                 sizeof(image)) == 0U);
+    puts("PASS vertical median removes bright/dark row impulses and preserves columns");
+}
+
+static void test_near_color_denoise_uses_two_dimensional_neighborhood(void)
+{
+    enum { ROWS = 7, COLS = 9 };
+    uint8_t image[ROWS * COLS];
+    uint8_t original[ROWS * COLS];
+    uint8_t scratch[2U * COLS];
+    for (uint16_t row = 0U; row < ROWS; ++row) {
+        for (uint16_t col = 0U; col < COLS; ++col) {
+            const uint8_t base = col < 4U ? 6U : 20U;
+            image[(uint32_t)row * COLS + col] =
+                (uint8_t)(base + ((row + col) % 3U) - 1U);
+        }
+    }
+    image[3U * COLS + 2U] = 220U;
+    image[3U * COLS + 6U] = 0U;
+    memcpy(original, image, sizeof(image));
+
+    CHECK(image_near_color_denoise3x3(image, ROWS, COLS, 3U,
+                                      scratch, sizeof(scratch)) == 1U);
+    CHECK(image[3U * COLS + 2U] >= 5U && image[3U * COLS + 2U] <= 7U);
+    CHECK(image[3U * COLS + 6U] >= 19U && image[3U * COLS + 6U] <= 21U);
+    for (uint16_t row = 1U; row + 1U < ROWS; ++row) {
+        CHECK(image[(uint32_t)row * COLS + 3U] < 12U);
+        CHECK(image[(uint32_t)row * COLS + 4U] > 14U);
+    }
+    for (uint16_t col = 0U; col < COLS; ++col) {
+        CHECK(image[col] == original[col]);
+        CHECK(image[(ROWS - 1U) * COLS + col] ==
+              original[(ROWS - 1U) * COLS + col]);
+    }
+    for (uint16_t row = 0U; row < ROWS; ++row) {
+        CHECK(image[(uint32_t)row * COLS] == original[(uint32_t)row * COLS]);
+        CHECK(image[(uint32_t)row * COLS + COLS - 1U] ==
+              original[(uint32_t)row * COLS + COLS - 1U]);
+    }
+    CHECK(image_near_color_denoise3x3(NULL, ROWS, COLS, 3U,
+                                      scratch, sizeof(scratch)) == 0U);
+    CHECK(image_near_color_denoise3x3(image, 2U, COLS, 3U,
+                                      scratch, sizeof(scratch)) == 0U);
+    CHECK(image_near_color_denoise3x3(image, ROWS, COLS, 3U,
+                                      scratch, sizeof(scratch) - 1U) == 0U);
+    CHECK(image_near_color_denoise3x3(image, ROWS, COLS, 3U,
+                                      image, sizeof(image)) == 0U);
+    puts("PASS 3x3 near-color denoise removes pixel impulses and preserves edges");
+}
+
+static void test_binary_despeckle(void)
+{
+    uint8_t image[49] = {0};
+    uint8_t scratch[14];
+    image[3U * 7U + 3U] = 255U;
+    CHECK(image_binary_despeckle3x3(image, 7U, 7U, scratch,
+                                    sizeof(scratch)) == 1U);
+    CHECK(image[3U * 7U + 3U] == 0U);
+
+    memset(image, 255, sizeof(image));
+    image[3U * 7U + 3U] = 0U;
+    CHECK(image_binary_despeckle3x3(image, 7U, 7U, scratch,
+                                    sizeof(scratch)) == 1U);
+    CHECK(image[3U * 7U + 3U] == 255U);
+
+    memset(image, 0, sizeof(image));
+    for (uint16_t row = 1U; row < 6U; ++row)
+        for (uint16_t col = 2U; col < 5U; ++col)
+            image[(uint32_t)row * 7U + col] = 255U;
+    uint8_t expected[49];
+    memcpy(expected, image, sizeof(image));
+    CHECK(image_binary_despeckle3x3(image, 7U, 7U, scratch,
+                                    sizeof(scratch)) == 1U);
+    CHECK(memcmp(image, expected, sizeof(image)) == 0);
+    CHECK(image_binary_despeckle3x3(NULL, 7U, 7U, scratch,
+                                    sizeof(scratch)) == 0U);
+    CHECK(image_binary_despeckle3x3(image, 7U, 7U, scratch, 13U) == 0U);
+    CHECK(image_binary_despeckle3x3(image, 7U, 7U, image,
+                                    sizeof(image)) == 0U);
+    puts("PASS binary isolated-speck and pinhole cleanup without edge motion");
+}
+
+
 int main(void)
 {
     test_empty_and_small();
     test_mean_invalid_and_rounding();
+    test_low_dynamic_adaptive_threshold();
+    test_banded_stretch_has_no_horizontal_seams();
+    test_vertical_median_rejects_row_impulses();
+    test_near_color_denoise_uses_two_dimensional_neighborhood();
+    test_binary_despeckle();
     test_mean_resolution(3, 3);
     test_mean_resolution(4, 5);
     test_mean_resolution(5, 4);

@@ -5,10 +5,12 @@
 
 #define TRACK_VISION_MAX_ROWS 480
 #define TRACK_VISION_MAX_COLS 752
-// 控制中线覆盖图像纵向 [20%H, 68%H)：避开过远端的不稳定区域，
-// 同时保持此前确认的车体遮挡上边界。
-#define TRACK_VISION_ROI_START_PERCENT 20U
-#define TRACK_VISION_ROI_END_PERCENT 68U
+// 摄像头已在传感器端输出原生 600x307 窗口；窗口外像素不进入 CSI。
+// 软件直接使用整幅已裁剪图，禁止再次裁剪而损失有效像素。
+#define TRACK_VISION_ROI_START_PERCENT 0U
+#define TRACK_VISION_ROI_END_PERCENT 100U
+#define TRACK_VISION_ROI_LEFT_PERCENT 0U
+#define TRACK_VISION_ROI_RIGHT_PERCENT 100U
 
 typedef enum track_vision_reject_t
 {
@@ -48,7 +50,7 @@ typedef struct track_vision_result_t
 
 /*
  * 白轨黑底二值图，非零像素视为白色，输入图像不会被修改。
- * 仅跟踪 [20%H, 68%H) 行，排除过远端和下部固定车体区域，
+ * 跟踪传感器端已裁剪的整幅 600x307 原生窗口，
  * 从近到远选择相连白色区域。
  * 保守限制：仅补偿不超过 2 像素的黑缝；白色宽度须在约 6.25%W
  * 至 80%W 之间，且左右边界都可见。单边出画、全白、窄亮点以及
@@ -64,5 +66,7 @@ typedef struct track_vision_result_t
  */
 void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
                           track_vision_result_t *out);
+uint8_t track_vision_fit_binary(uint8_t *binary, uint16_t rows, uint16_t cols,
+                                const track_vision_result_t *detected);
 
 #endif

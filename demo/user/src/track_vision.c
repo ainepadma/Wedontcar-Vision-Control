@@ -42,14 +42,18 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     const uint16_t roi_start = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_START_PERCENT / 100U);
     const uint16_t roi_end = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U);
     const uint16_t roi_rows = roi_end - roi_start;
+    const uint16_t roi_left = (uint16_t)((uint32_t)cols * TRACK_VISION_ROI_LEFT_PERCENT / 100U);
+    const uint16_t roi_right = (uint16_t)((uint32_t)cols * TRACK_VISION_ROI_RIGHT_PERCENT / 100U);
+    const uint16_t roi_cols = roi_right - roi_left;
+    const uint16_t roi_center = (uint16_t)((roi_left + roi_right - 1U) / 2U);
     const uint16_t zone_rows = track_max(1U, roi_rows / 3U);
     const uint16_t near_start = roi_end - zone_rows;
     const uint16_t far_end = roi_start + zone_rows;
-    const uint16_t minimum_width = track_max(6U, cols / 16U);
-    const uint16_t maximum_width = (uint16_t)((uint32_t)cols * 4U / 5U);
+    const uint16_t minimum_width = track_max(6U, roi_cols / 16U);
+    const uint16_t maximum_width = (uint16_t)((uint32_t)roi_cols * 4U / 5U);
     // 弯道允许每行中线移动约 2.1%W，并跨过约 4.2%H 的短暂缺口；
     // 宽度、密度、重叠和双边界约束仍负责拒绝灯光与零散白点。
-    const uint16_t jump_per_row = track_max(2U, cols / 48U);
+    const uint16_t jump_per_row = track_max(2U, roi_cols / 48U);
     const uint16_t maximum_missing_rows = track_max(2U, rows / 24U);
 
     uint16_t previous_row = 0;
@@ -82,19 +86,19 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
         uint16_t candidates = 0;
         uint16_t connected_shapes = 0;
         uint16_t shape_candidates = 0;
-        uint16_t x = 0;
-        while (x < cols)
+        uint16_t x = roi_left;
+        while (x < roi_right)
         {
-            while (x < cols && pixels[x] == 0U)
+            while (x < roi_right && pixels[x] == 0U)
                 ++x;
-            if (x == cols)
+            if (x == roi_right)
                 break;
 
             const uint16_t start = x;
             uint16_t end = x;
             uint16_t white_pixels = 0;
             uint8_t black_gap = 0;
-            while (x < cols)
+            while (x < roi_right)
             {
                 if (pixels[x] != 0U)
                 {
@@ -111,7 +115,7 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
             }
 
             const uint16_t width = end - start + 1U;
-            if (start == 0U || end == cols - 1U ||
+            if (start == roi_left || end == roi_right - 1U ||
                 width < minimum_width || width > maximum_width ||
                 (uint32_t)white_pixels * 4U < (uint32_t)width * 3U)
                 continue;
@@ -119,7 +123,7 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
             ++shape_candidates;
 
             const uint16_t center = (start + end) / 2U;
-            uint16_t distance = track_distance(center, cols / 2U);
+            uint16_t distance = track_distance(center, roi_center);
             if (have_previous)
             {
                 const uint16_t overlap_left = track_max(start, previous_left);
@@ -215,7 +219,7 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     if ((uint32_t)near_count * 100U >= (uint32_t)zone_rows * 35U &&
         (uint32_t)far_count * 100U >= (uint32_t)zone_rows * 35U &&
         out->width_growth_percent >= 135U &&
-        (uint32_t)out->far_width * 100U >= (uint32_t)cols * 40U)
+        (uint32_t)out->far_width * 100U >= (uint32_t)roi_cols * 40U)
     {
         const int32_t near_center = (int32_t)(near_sum / near_count);
         const int32_t far_center = (int32_t)(far_sum / far_count);
@@ -223,12 +227,12 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
         /* Symmetric widening alone is a cross, not a directional ring entry.
          * Require a visible left/right displacement before arming the ring. */
         if (track_distance((uint16_t)near_center, (uint16_t)far_center) >=
-            track_max(2U, cols / 16U))
+            track_max(2U, roi_cols / 16U))
         {
             out->ring_candidate = 1U;
-            if (center_delta <= -(int32_t)(cols / 16U))
+            if (center_delta <= -(int32_t)(roi_cols / 16U))
                 out->ring_direction = 1;
-            else if (center_delta >= (int32_t)(cols / 16U))
+            else if (center_delta >= (int32_t)(roi_cols / 16U))
                 out->ring_direction = -1;
         }
     }
@@ -246,9 +250,95 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
 
     out->valid = 1U;
     out->error = track_clamp_error(
-        ((int64_t)2 * weighted_sum - (int64_t)(cols - 1U) * weight_total) * 1000 /
-        ((int64_t)(cols - 1U) * weight_total));
+        ((int64_t)2 * weighted_sum -
+         (int64_t)(roi_left + roi_right - 1U) * weight_total) * 1000 /
+        ((int64_t)(roi_cols - 1U) * weight_total));
     out->heading = track_clamp_error(
         ((int64_t)far_sum * near_count - (int64_t)near_sum * far_count) * 2000 /
-        ((int64_t)near_count * far_count * (cols - 1U)));
+        ((int64_t)near_count * far_count * (roi_cols - 1U)));
+}
+
+uint8_t track_vision_fit_binary(uint8_t *binary, uint16_t rows, uint16_t cols,
+                                const track_vision_result_t *detected)
+{
+    if (binary == NULL || detected == NULL || !detected->valid ||
+        detected->reject_flags != TRACK_VISION_REJECT_NONE ||
+        rows < 10U || rows > TRACK_VISION_MAX_ROWS ||
+        cols < 16U || cols > TRACK_VISION_MAX_COLS)
+        return 0U;
+
+    const uint16_t roi_start = (uint16_t)((uint32_t)rows *
+        TRACK_VISION_ROI_START_PERCENT / 100U);
+    const uint16_t roi_end = (uint16_t)((uint32_t)rows *
+        TRACK_VISION_ROI_END_PERCENT / 100U);
+    uint16_t fitted_left[TRACK_VISION_MAX_ROWS] = {0};
+    uint16_t fitted_right[TRACK_VISION_MAX_ROWS] = {0};
+    uint8_t fitted_valid[TRACK_VISION_MAX_ROWS] = {0};
+
+    for (uint16_t row = roi_start; row < roi_end; ++row)
+    {
+        if (!detected->row_valid[row])
+            continue;
+        uint32_t left_sum = detected->left[row] * 2U;
+        uint32_t right_sum = detected->right[row] * 2U;
+        uint16_t weight = 2U;
+        if (row > roi_start && detected->row_valid[row - 1U])
+        {
+            left_sum += detected->left[row - 1U];
+            right_sum += detected->right[row - 1U];
+            ++weight;
+        }
+        if (row + 1U < roi_end && detected->row_valid[row + 1U])
+        {
+            left_sum += detected->left[row + 1U];
+            right_sum += detected->right[row + 1U];
+            ++weight;
+        }
+        fitted_left[row] = (uint16_t)((left_sum + weight / 2U) / weight);
+        fitted_right[row] = (uint16_t)((right_sum + weight / 2U) / weight);
+        fitted_valid[row] = 1U;
+    }
+
+    // 只有没有分叉歧义时才补短缺行，避免用拟合掩盖真实岔路。
+    if (detected->ambiguous_rows == 0U)
+    {
+        const uint16_t maximum_gap = track_max(2U, rows / 24U);
+        uint16_t previous = roi_start;
+        uint8_t have_previous = 0U;
+        for (uint16_t row = roi_start; row < roi_end; ++row)
+        {
+            if (!fitted_valid[row])
+                continue;
+            if (have_previous && row > previous + 1U &&
+                row - previous - 1U <= maximum_gap)
+            {
+                const uint16_t span = row - previous;
+                for (uint16_t missing = previous + 1U; missing < row; ++missing)
+                {
+                    const uint16_t step = missing - previous;
+                    fitted_left[missing] = (uint16_t)(
+                        ((uint32_t)fitted_left[previous] * (span - step) +
+                         (uint32_t)fitted_left[row] * step + span / 2U) / span);
+                    fitted_right[missing] = (uint16_t)(
+                        ((uint32_t)fitted_right[previous] * (span - step) +
+                         (uint32_t)fitted_right[row] * step + span / 2U) / span);
+                    fitted_valid[missing] = 1U;
+                }
+            }
+            previous = row;
+            have_previous = 1U;
+        }
+    }
+
+    for (uint16_t row = roi_start; row < roi_end; ++row)
+    {
+        if (!fitted_valid[row] || fitted_left[row] >= fitted_right[row] ||
+            fitted_right[row] >= cols)
+            continue;
+        uint8_t *pixels = binary + (uint32_t)row * cols;
+        memset(pixels, 0, cols);
+        memset(pixels + fitted_left[row], 255,
+               fitted_right[row] - fitted_left[row] + 1U);
+    }
+    return 1U;
 }

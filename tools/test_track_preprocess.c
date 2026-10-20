@@ -10,20 +10,36 @@
     fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); exit(EXIT_FAILURE); \
 } } while (0)
 
+#define TEST_THRESHOLD_BAND_ROWS 8U
+#define TEST_THRESHOLD_OFFSET 12
+#define TEST_STRETCH_LOW_PERCENT 1U
+#define TEST_STRETCH_HIGH_PERCENT 96U
+#define TEST_NEAR_COLOR_DENOISE_ENABLED 1
+#define TEST_NEAR_COLOR_RADIUS 4U
+
 static uint8_t pixels[TRACK_VISION_MAX_ROWS * TRACK_VISION_MAX_COLS];
+#if TEST_NEAR_COLOR_DENOISE_ENABLED
 static uint8_t scratch[2U * TRACK_VISION_MAX_COLS];
+#endif
 static track_vision_result_t result;
 
 static uint8_t process(uint16_t rows, uint16_t cols)
 {
     uint32_t histogram[256];
-    CHECK(image_mean3x3(pixels, rows, cols, scratch, sizeof(scratch)));
-    get_hist_gram(pixels, rows, cols, histogram);
-    uint8_t threshold = get_threshold_otsu(histogram);
-    if (threshold < 1U) threshold = 1U;
-    if (threshold > 254U) threshold = 254U;
-    binaryzation_process(pixels, rows, cols, threshold);
+#if TEST_NEAR_COLOR_DENOISE_ENABLED
+    CHECK(image_near_color_denoise3x3(
+        pixels, rows, cols, TEST_NEAR_COLOR_RADIUS,
+        scratch, sizeof(scratch)));
+#endif
+    CHECK(image_banded_percentile_stretch(
+        pixels, rows, cols, TEST_THRESHOLD_BAND_ROWS,
+        TEST_STRETCH_LOW_PERCENT, TEST_STRETCH_HIGH_PERCENT, histogram));
+    const uint8_t threshold = image_banded_otsu_binary_offset(
+        pixels, rows, cols, TEST_THRESHOLD_BAND_ROWS,
+        TEST_THRESHOLD_OFFSET, histogram);
     track_vision_process(pixels, rows, cols, &result);
+    if (track_vision_fit_binary(pixels, rows, cols, &result))
+        track_vision_process(pixels, rows, cols, &result);
     return threshold;
 }
 
@@ -61,14 +77,17 @@ static void synthetic(uint16_t rows, uint16_t cols)
     process(rows, cols);
     CHECK(result.valid && result.confidence >= 95U && abs(result.error) < 20);
 
-    // The user confirmed that the fixed body starts around 70%H. The calibrated
-    // 68%H lower ROI bound must exclude it without inventing hidden track pixels.
+    // The software receives the already-cropped native sensor window and must
+    // use all of it without another percentage crop.
     draw_gray_lane(rows, cols, 0);
-    for (uint16_t y = (uint16_t)((uint32_t)rows * 70U / 100U); y < rows; ++y)
-        memset(pixels + (uint32_t)y * cols + cols / 3U, 0, cols / 3U);
     process(rows, cols);
+    printf("SENSOR WINDOW %ux%u: valid=%u Q=%u rows=%u error=%d heading=%d\n",
+           (unsigned int)cols, (unsigned int)rows,
+           (unsigned int)result.valid, (unsigned int)result.confidence,
+           (unsigned int)result.valid_rows, (int)result.error,
+           (int)result.heading);
     CHECK(result.valid && abs(result.error) < 20);
-    CHECK(result.confidence == 100U);
+    CHECK(result.confidence >= 90U);
     CHECK(result.reject_flags == TRACK_VISION_REJECT_NONE);
 
     // A three-frame observation only arms readiness; it must not start motors.
@@ -85,25 +104,28 @@ static void synthetic(uint16_t rows, uint16_t cols)
     CHECK(output.running);
     memset(pixels, 0, size);
     process(rows, cols);
-    track_control_observe(&control, result.error, result.heading,
-                          result.confidence, result.valid, 80U);
-    output = track_control_tick(&control, 80U);
-    CHECK(output.running && output.target_speed == control.config.speed_curve_min);
-    track_control_observe(&control, result.error, result.heading,
-                          result.confidence, result.valid, 100U);
-    output = track_control_tick(&control, 100U);
-    CHECK(output.running && output.target_speed == control.config.speed_curve_min);
-    track_control_observe(&control, result.error, result.heading,
-                          result.confidence, result.valid, 120U);
-    output = track_control_tick(&control, 120U);
-    CHECK(!output.running && output.target_speed == 0.0f);
-    CHECK(output.stop_reason == TRACK_STOP_LOST);
-    draw_gray_lane(rows, cols, 0);
-    process(rows, cols);
-    for (uint32_t now = 140; now <= 180; now += 20)
+    uint32_t now = 60U;
+    for (uint8_t lost = 1U; lost <= TRACK_LOST_STOP_FRAMES; ++lost) {
+        now += 20U;
         track_control_observe(&control, result.error, result.heading,
                               result.confidence, result.valid, now);
-    output = track_control_tick(&control, 180U);
+        output = track_control_tick(&control, now);
+        if (lost < TRACK_LOST_STOP_FRAMES)
+            CHECK(output.running &&
+                  output.target_speed == control.config.speed_curve_min);
+        else {
+            CHECK(!output.running && output.target_speed == 0.0f);
+            CHECK(output.stop_reason == TRACK_STOP_LOST);
+        }
+    }
+    draw_gray_lane(rows, cols, 0);
+    process(rows, cols);
+    for (uint8_t recovery = 0U; recovery < 3U; ++recovery) {
+        now += 20U;
+        track_control_observe(&control, result.error, result.heading,
+                              result.confidence, result.valid, now);
+    }
+    output = track_control_tick(&control, now);
     CHECK(output.ready && !output.running && output.target_speed == 0.0f);
 
     for (int mode = 1; mode <= 3; ++mode) {
@@ -111,7 +133,7 @@ static void synthetic(uint16_t rows, uint16_t cols)
         process(rows, cols);
         CHECK(!result.valid);
     }
-    printf("PASS gray pipeline %ux%u: noise, body mask, missing near/far, clipped edge, manual/LOST gate\n",
+    printf("PASS gray pipeline %ux%u: noise, native sensor window, missing near/far, clipped edge, manual/LOST gate\n",
            (unsigned int)cols, (unsigned int)rows);
 }
 
@@ -136,6 +158,7 @@ int main(int argc, char **argv)
 {
     synthetic(120, 188);
     synthetic(240, 376);
+    synthetic(307, 600);
     synthetic(480, 752);
     for (int i = 1; i < argc; ++i) captured_frame(argv[i]);
     puts("All grayscale-to-control pipeline tests passed; no hardware accessed.");

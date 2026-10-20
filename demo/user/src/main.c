@@ -4,7 +4,13 @@
 // 暗场先轻量去噪，再使用原始大津阈值区分白轨和蓝底。
 // C13 控制启停；C14 开启时需赛道有效，关闭时只保留人工停机和 PWM 硬限幅。
 #define CAMERA_SEND_RAW 1
+#define CAMERA_NEAR_COLOR_DENOISE_ENABLED 1
+#define CAMERA_NEAR_COLOR_RADIUS 4U
 #define CAMERA_TUNING_EXPOSURE 1024U
+#define CAMERA_THRESHOLD_BAND_ROWS 8U
+#define CAMERA_THRESHOLD_OFFSET 12
+#define CAMERA_STRETCH_LOW_PERCENT 1U
+#define CAMERA_STRETCH_HIGH_PERCENT 96U
 #define TRACK_DISPLAY_WIDTH 125U
 #define TRACK_DISPLAY_HEIGHT 100U
 #define IMU_AXIS_TEST_MODE 0
@@ -93,15 +99,19 @@ void Init()
                         imu_device_status == IMU660RB_RESULT_OK);
 }
 
-uint8_t image[MT9V03X_H][MT9V03X_W];
+AT_OCRAM_SECTION_ALIGN(uint8_t image[MT9V03X_H][MT9V03X_W], 64);
 uint32_t hist_gram[256];
+#if CAMERA_NEAR_COLOR_DENOISE_ENABLED
 static uint8_t image_filter_scratch[2U * MT9V03X_W];
+#endif
+static uint8_t track_display_image[TRACK_DISPLAY_HEIGHT][TRACK_DISPLAY_WIDTH];
 static track_vision_result_t track_result;
 
 // 冻结一帧快照，由 UART 中断慢慢发送。传输中不覆盖，忙时跳过新预览帧。
 // 数据头及诊断文本也纳入同一队列，禁止 printf 插入正在发送的图像。
 #define CAMERA_DIAGNOSTIC_SIZE 768U
-static uint8_t camera_tx_packet[CAMERA_DIAGNOSTIC_SIZE + 12U + sizeof(image)];
+AT_OCRAM_SECTION_ALIGN(static uint8_t camera_tx_packet[
+    CAMERA_DIAGNOSTIC_SIZE + 12U + sizeof(image)], 64);
 static volatile uint32_t camera_tx_position;
 static volatile uint32_t camera_tx_length;
 #if CAMERA_SEND_RAW
@@ -184,7 +194,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.3.1 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d\r\n",
+        "#CAM FW=0.3.3 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -354,25 +364,66 @@ static void screen_draw_stats(void)
     screen_stats_dirty = 0;
 }
 
-// 只叠加到 TFT，不改动二值图或控制器输入：红色为左右边沿，蓝色为判定中线。
-static void screen_draw_track_overlay(void)
+// 将中央裁剪区域完整映射到 TFT；不改动二值图或控制器输入。
+static void screen_prepare_track_crop(void)
 {
+    const uint16_t source_top = (uint16_t)((uint32_t)MT9V03X_H *
+        TRACK_VISION_ROI_START_PERCENT / 100U);
+    const uint16_t source_bottom = (uint16_t)((uint32_t)MT9V03X_H *
+        TRACK_VISION_ROI_END_PERCENT / 100U);
+    const uint16_t source_left = (uint16_t)((uint32_t)MT9V03X_W *
+        TRACK_VISION_ROI_LEFT_PERCENT / 100U);
+    const uint16_t source_right = (uint16_t)((uint32_t)MT9V03X_W *
+        TRACK_VISION_ROI_RIGHT_PERCENT / 100U);
+    const uint16_t source_height = source_bottom - source_top;
+    const uint16_t source_width = source_right - source_left;
+
     for (uint16_t y = 0U; y < TRACK_DISPLAY_HEIGHT; ++y)
     {
-        const uint16_t row = (uint16_t)((uint32_t)y * MT9V03X_H /
-                                        TRACK_DISPLAY_HEIGHT);
+        const uint16_t row = (uint16_t)(source_top +
+            (uint32_t)y * (source_height - 1U) /
+            (TRACK_DISPLAY_HEIGHT - 1U));
+        for (uint16_t x = 0U; x < TRACK_DISPLAY_WIDTH; ++x)
+        {
+            const uint16_t col = (uint16_t)(source_left +
+                (uint32_t)x * (source_width - 1U) /
+                (TRACK_DISPLAY_WIDTH - 1U));
+            track_display_image[y][x] = image[row][col];
+        }
+    }
+}
+
+// 只叠加到 TFT：红色为左右边沿，蓝色为判定中线。
+static void screen_draw_track_overlay(void)
+{
+    const uint16_t source_top = (uint16_t)((uint32_t)MT9V03X_H *
+        TRACK_VISION_ROI_START_PERCENT / 100U);
+    const uint16_t source_bottom = (uint16_t)((uint32_t)MT9V03X_H *
+        TRACK_VISION_ROI_END_PERCENT / 100U);
+    const uint16_t source_left = (uint16_t)((uint32_t)MT9V03X_W *
+        TRACK_VISION_ROI_LEFT_PERCENT / 100U);
+    const uint16_t source_right = (uint16_t)((uint32_t)MT9V03X_W *
+        TRACK_VISION_ROI_RIGHT_PERCENT / 100U);
+    const uint16_t source_height = source_bottom - source_top;
+    const uint16_t source_width = source_right - source_left;
+
+    for (uint16_t row = source_top; row < source_bottom; ++row)
+    {
         if (!track_result.row_valid[row])
             continue;
 
-        uint16_t left = (uint16_t)(((uint32_t)track_result.left[row] *
-                                    TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
-                                   MT9V03X_W);
-        uint16_t center = (uint16_t)(((uint32_t)track_result.center[row] *
-                                      TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
-                                     MT9V03X_W);
-        uint16_t right = (uint16_t)(((uint32_t)track_result.right[row] *
-                                     TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
-                                    MT9V03X_W);
+        const uint16_t y = (uint16_t)((uint32_t)(row - source_top) *
+            (TRACK_DISPLAY_HEIGHT - 1U) / (source_height - 1U));
+        if (track_result.left[row] < source_left ||
+            track_result.right[row] >= source_right)
+            continue;
+
+        uint16_t left = (uint16_t)((uint32_t)(track_result.left[row] - source_left) *
+                                   (TRACK_DISPLAY_WIDTH - 1U) / (source_width - 1U));
+        uint16_t center = (uint16_t)((uint32_t)(track_result.center[row] - source_left) *
+                                     (TRACK_DISPLAY_WIDTH - 1U) / (source_width - 1U));
+        uint16_t right = (uint16_t)((uint32_t)(track_result.right[row] - source_left) *
+                                    (TRACK_DISPLAY_WIDTH - 1U) / (source_width - 1U));
         if (left >= TRACK_DISPLAY_WIDTH)
             left = TRACK_DISPLAY_WIDTH - 1U;
         if (center >= TRACK_DISPLAY_WIDTH)
@@ -476,18 +527,33 @@ int main(void)
             if (screen_enabled)
                 assistant_prepare_raw_image();
 #endif
-            // 两行缓存原地均值，原始图传快照已冻结；不覆盖 CSI 缓冲。
-            if (!image_mean3x3((uint8_t *)image, MT9V03X_H, MT9V03X_W,
-                               image_filter_scratch, sizeof(image_filter_scratch)))
-                memset(image, 0, sizeof(image)); // 参数异常时输出无效图，保持停机。
-            // 保持已烧录并经用户脱机确认可启动的全图 Otsu 方案。
-            get_hist_gram((uint8_t *)image, MT9V03X_H, MT9V03X_W, hist_gram);
-            unsigned int adjusted_threshold = get_threshold_otsu(hist_gram);
-            unsigned char threshold = (unsigned char)MAX(1U, MIN(254U, adjusted_threshold));
-            camera_threshold = threshold;
-            binaryzation_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, threshold);
+            // 摄像头已在传感器端只输出原生 600x307 有效窗口，区域外像素
+            // 不进入 CSI；此处直接处理完整窗口，不再做软件清零裁剪。
+            // 只按每个像素周围 3x3 邻域中的相似灰度组降噪，不做逐行、
+            // 逐列修正，也不跨越白轨/蓝底的强边沿混合。
+#if CAMERA_NEAR_COLOR_DENOISE_ENABLED
+            if (!image_near_color_denoise3x3(
+                    (uint8_t *)image, MT9V03X_H, MT9V03X_W,
+                    CAMERA_NEAR_COLOR_RADIUS, image_filter_scratch,
+                    sizeof(image_filter_scratch)))
+                memset(image, 0, sizeof(image));
+#endif
+            if (!image_banded_percentile_stretch(
+                    (uint8_t *)image, MT9V03X_H, MT9V03X_W,
+                    CAMERA_THRESHOLD_BAND_ROWS, CAMERA_STRETCH_LOW_PERCENT,
+                    CAMERA_STRETCH_HIGH_PERCENT, hist_gram))
+                memset(image, 0, sizeof(image));
+            // 车载电源下原始灰度集中在低动态范围：逐带拉伸后局部阈值化，
+            // 不使用会抹平赛道边沿的横向降噪。
+            camera_threshold = image_banded_otsu_binary_offset(
+                (uint8_t *)image, MT9V03X_H, MT9V03X_W,
+                CAMERA_THRESHOLD_BAND_ROWS, CAMERA_THRESHOLD_OFFSET, hist_gram);
             // 在叠加调试线之前识别赛道，并将一帧完整结果交给控制中断。
             track_vision_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, &track_result);
+            if (track_vision_fit_binary((uint8_t *)image, MT9V03X_H,
+                                        MT9V03X_W, &track_result))
+                track_vision_process((uint8_t *)image, MT9V03X_H,
+                                     MT9V03X_W, &track_result);
             track_result.frame_number = frame_number;
             if (!track_result.valid)
                 ++invalid_vision_frames;
@@ -495,8 +561,10 @@ int main(void)
 
             if (screen_enabled)
             {
-                tft180_displayimage03x((uint8_t *)image,
-                                       TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT);
+                screen_prepare_track_crop();
+                tft180_show_gray_image(0, 0, (uint8_t *)track_display_image,
+                                       TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT,
+                                       TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT, 0);
                 screen_draw_track_overlay();
                 ++displayed_frames;
                 // 图像、边线与诊断全部读取刚完成的 track_result，禁止跨帧混看。

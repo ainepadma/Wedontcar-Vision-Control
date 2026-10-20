@@ -132,6 +132,8 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     const uint16_t roi_start = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_START_PERCENT / 100U);
     const uint16_t roi_end = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U);
     const uint16_t roi_rows = roi_end - roi_start;
+    const uint16_t roi_left = (uint16_t)((uint32_t)cols * TRACK_VISION_ROI_LEFT_PERCENT / 100U);
+    const uint16_t roi_right = (uint16_t)((uint32_t)cols * TRACK_VISION_ROI_RIGHT_PERCENT / 100U);
     const uint16_t zone_rows = roi_rows / 3U;
 
     memset(image, 0, count);
@@ -219,6 +221,9 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     CHECK(!result->valid && result->valid_rows == 0U);
     CHECK(result->ambiguous_rows == roi_rows);
     CHECK((result->reject_flags & TRACK_VISION_REJECT_NO_SEED) != 0U);
+    const uint32_t fork_checksum = image_checksum(image, count);
+    CHECK(track_vision_fit_binary(image, rows, cols, result) == 0U);
+    CHECK(image_checksum(image, count) == fork_checksum);
 
     // A distant unrelated bright block must not steal the established track.
     draw_lane(image, rows, cols, 0, 0);
@@ -255,16 +260,17 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     CHECK(!result->valid);
     CHECK((result->reject_flags & TRACK_VISION_REJECT_NEAR_COVERAGE) != 0U);
 
-    // Fixed car-body occlusion begins below the calibrated 68% lower bound.
-    // It must not split the near-field lane or appear as a false inner edge.
+    // The complete sensor-side window is the software ROI; detected boundaries
+    // must remain strictly inside that captured frame.
     draw_lane(image, rows, cols, 0, 0);
-    for (uint16_t y = roi_end; y < rows; ++y)
-        memset(image + (uint32_t)y * cols + cols / 3U, 0, cols / 3U);
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->confidence == 100U);
     CHECK(abs(result->error) <= 10 && result->heading == 0);
-    for (uint16_t y = roi_end; y < rows; ++y)
-        CHECK(result->row_valid[y] == 0U);
+    for (uint16_t y = roi_start; y < roi_end; ++y)
+    {
+        CHECK(result->left[y] > roi_left);
+        CHECK(result->right[y] < roi_right - 1U);
+    }
 
     // A full-width interruption cannot be replaced with an invented center.
     draw_lane(image, rows, cols, 0, 0);
@@ -273,6 +279,10 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->row_valid[missing_row] == 0U);
     CHECK(result->valid_rows == roi_rows - 1U);
+    CHECK(track_vision_fit_binary(image, rows, cols, result) == 1U);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->row_valid[missing_row] != 0U);
+    CHECK(result->valid_rows == roi_rows);
 
     // Abruptly displaced far section must not be reacquired as the same track.
     draw_lane(image, rows, cols, 0, 0);
@@ -336,6 +346,7 @@ int main(void)
     test_invalid_dimensions();
     test_resolution(120, 188);
     test_resolution(240, 376);
+    test_resolution(307, 600);
     test_resolution(480, 752);
     puts("All track-vision host tests passed.");
     return EXIT_SUCCESS;
