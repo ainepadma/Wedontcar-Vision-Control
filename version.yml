@@ -1,3 +1,4 @@
-version: "0.3.2-beta"
+version: "0.3.3-beta"
 date: "2026-10-20"
-commit: "cef1feb"
+# 1020-deng 分支源码快照；合并发布后替换为对应 main 提交。
+commit: "d43d912"
