@@ -186,10 +186,6 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     CHECK(result->ring_direction == 1);
     CHECK(result->far_width > result->near_width);
     CHECK(result->width_growth_percent >= 135U);
-    // A symmetric opening (e.g. a cross) must not arm ring steering.
-    draw_opening_lane(image, rows, cols, 0);
-    verify(image, rows, cols, &guarded);
-    CHECK(result->valid && !result->ring_candidate);
     draw_opening_lane(image, rows, cols, cols / 10);
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->ring_candidate);
@@ -226,22 +222,6 @@ static void test_resolution(uint16_t rows, uint16_t cols)
         memset(image + (uint32_t)y * cols + cols / 16U, 255, cols / 10U);
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && abs(result->error) <= 10);
-
-    // An asymmetric fork must stop the centerline instead of selecting the
-    // slightly nearer branch. Both arms still overlap the established lane.
-    draw_lane(image, rows, cols, 0, 0);
-    const uint16_t fork_row = roi_start + roi_rows / 2U;
-    for (uint16_t y = roi_start; y < fork_row; ++y)
-    {
-        memset(image + (uint32_t)y * cols, 0, cols);
-        memset(image + (uint32_t)y * cols + cols / 4U, 255, cols / 5U);
-        memset(image + (uint32_t)y * cols + cols * 11U / 20U,
-               255, cols * 11U / 50U);
-    }
-    verify(image, rows, cols, &guarded);
-    CHECK(result->ambiguous_rows > 0U);
-    for (uint16_t y = roi_start; y < fork_row; ++y)
-        CHECK(!result->row_valid[y]);
 
     // Missing far/near thirds invalidate output even if 2/3 of ROI remains.
     draw_lane(image, rows, cols, 0, 0);

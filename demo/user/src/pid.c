@@ -11,6 +11,21 @@ volatile float speed_real_l = 0.0f, speed_real_r = 0.0f;
 volatile float speed_pwm_l = 0.0f, speed_pwm_r = 0.0f;
 volatile float speed_real = 0.0f, speed_pwm = 0.0f;
 
+/* Reference: Lscyzq/HFK_STC32G144K project/code/Motor.c.
+ * V * half_track / R = V * (half_track / wheelbase) * tan(steering).
+ * Servo linkage is approximated by the commanded angle; tune the gain on-car.
+ */
+float Speed_Differential_Delta(float target, float right_angle_deg)
+{
+    float ratio;
+    if (!isfinite(target) || target <= 0.0f || !isfinite(right_angle_deg))
+        return 0.0f;
+    right_angle_deg = constrain_float(right_angle_deg, -45.0f, 45.0f);
+    ratio = SPEED_DIFF_GAIN * tanf(right_angle_deg * 0.01745329252f);
+    ratio = constrain_float(ratio, -0.5f, 0.5f);
+    return target * ratio;
+}
+
 pid_param_t speed_pid_l;  // 电机PID
 pid_param_t speed_pid_r;  // 电机PID
 
