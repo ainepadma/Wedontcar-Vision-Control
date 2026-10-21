@@ -143,7 +143,15 @@ static void cleanup(void)
     for (uint16_t y = 0; y < rows; ++y)
         for (uint16_t x = 0; x < cols; ++x)
             CHECK(image[(uint32_t)y * cols + x] == expected[(uint32_t)y * cols + cols - 1U - x]);
-    puts("PASS isolated cleanup, 2x2 / 30x4 island / extended lines / edge retained, mirror symmetry");
+    memset(image, 0, (size_t)rows * cols);
+    for (uint16_t y = 4U; y < 6U; ++y)
+        for (uint16_t x = 4U; x < 6U; ++x) image[(uint32_t)y * cols + x] = 255U;
+    for (uint16_t y = 10U; y < 25U; ++y)
+        memset(image + (uint32_t)y * cols + 30U, 255, 20U);
+    CHECK(image_clean_binary(image, rows, cols, scratch, sizeof(scratch)));
+    CHECK(image[4U * cols + 4U] == 0U && image[5U * cols + 5U] == 0U);
+    CHECK(image[15U * cols + 35U] == 255U);
+    puts("PASS isolated cleanup, white 2x2 spots, black holes, long lines, road and mirror symmetry");
 }
 
 static void invalid_input(void)

@@ -90,10 +90,10 @@ uint8_t image_track_preprocess_stable(uint8_t *image, uint16_t rows, uint16_t co
  */
 uint32_t image_fill_small_black_holes(uint8_t *image, uint16_t rows, uint16_t cols);
 
-/* Remove only isolated 1x1 / horizontal 2x1 binary spots with a completely
- * opposite-colour one-pixel surround. Reads original neighbours, no cascade.
- * Two scratch rows, disjoint from image; image must already contain 0/255.
- * Outer border, longer lines, 2x2 blocks and larger islands are preserved.
+/* Remove isolated 1x1 / horizontal 2x1 spots with a completely opposite-colour
+ * surround, plus detached white 2x2 islands surrounded by black. Two scratch
+ * rows, disjoint from image; input is 0/255. Outer border, connected white
+ * road, black 2x2 holes, longer lines and larger islands are preserved.
  */
 uint8_t image_clean_binary(uint8_t *image, uint16_t rows, uint16_t cols,
                            uint8_t *scratch, uint32_t scratch_size);

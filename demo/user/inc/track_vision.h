@@ -122,8 +122,9 @@ typedef struct track_vision_result_t
  * 白轨黑底二值图，非零像素视为白色，输入图像不会被修改。
  * 仅跟踪 [40%H, 68%H) 行，排除底部固定车体区域，从近到远选择相连白色区域。
  * 保守限制：仅补偿不超过 2 像素的黑缝；白色宽度须在约 6.25%W
- * 至 80%W 之间，且左右边界都可见。单边出画、全白、窄亮点以及
- * 无法确定唯一连续分支的行不补线、不推测中线。不能代替岔路决策。
+ * 至 80%W 之间。弯道近端若仅有一侧边界出画，且同帧完整赛道足以
+ * 估计路宽、可见边界逐行连续，则补算该侧的中线；无依据的单边出画、
+ * 全白、窄亮点以及无法确定唯一连续分支的行仍拒绝。不能代替岔路决策。
  * 有效行总比例、近端 1/3 和远端 1/3 各自的比例均须达到 45%。
  * confidence 为 ROI 有效行百分比；整体无效时 error/heading 均为零。
  * reject_flags、近/远有效行和行级拒绝计数均属于本次调用，便于把诊断
@@ -135,6 +136,11 @@ typedef struct track_vision_result_t
  */
 void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
                           track_vision_result_t *out);
+
+/* 仅在本帧视觉计算及发布之后用于屏幕预览。把未连到近处赛道的白斑
+ * 从预览图中隐藏；不会修改 result、控制输入或发送前冻结的原始帧。
+ * 必须紧跟同一帧的 track_vision_process/track_ring_vision_process 调用。 */
+void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols);
 
 /* Call after ordinary processing, once per captured frame, before publishing.
  * Learns perspective width from narrow, paired near-field boundaries, freezes

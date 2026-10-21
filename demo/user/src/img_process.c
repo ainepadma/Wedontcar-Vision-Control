@@ -148,6 +148,24 @@ uint8_t image_clean_binary(uint8_t *image, uint16_t rows, uint16_t cols,
         previous = current;
         current = recycled;
     }
+    /* 小块反光常形成 2x2 白岛；只有四周一圈全黑时才删除，
+     * 因而不会削掉连到赛道的白色边缘或环岛白区。 */
+    for (uint16_t row = 1U; row + 2U < rows; ++row)
+        for (uint16_t col = 1U; col + 2U < cols; ++col)
+        {
+            uint32_t top = (uint32_t)row * cols + col;
+            if (!image[top] || !image[top + 1U] ||
+                !image[top + cols] || !image[top + cols + 1U]) continue;
+            uint8_t surrounded = 1U;
+            for (uint16_t x = col - 1U; x <= col + 2U; ++x)
+                if (image[(uint32_t)(row - 1U) * cols + x] ||
+                    image[(uint32_t)(row + 2U) * cols + x]) surrounded = 0U;
+            if (image[top - 1U] || image[top + 2U] ||
+                image[top + cols - 1U] || image[top + cols + 2U]) surrounded = 0U;
+            if (surrounded)
+                image[top] = image[top + 1U] =
+                    image[top + cols] = image[top + cols + 1U] = 0U;
+        }
     return 1U;
 }
 

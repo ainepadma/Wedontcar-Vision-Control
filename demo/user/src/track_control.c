@@ -8,7 +8,8 @@
 #define TRACK_LOST_STOP_FRAMES 3U
 #define TRACK_STALE_MS 150U
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
-#define TRACK_HEADING_WEIGHT 2.00
+/* 远处走向的前瞻权重：从 2.00 降低 20%，减轻提前入弯。 */
+#define TRACK_HEADING_WEIGHT 1.60
 
 static double track_clamp(double value, double low, double high)
 {

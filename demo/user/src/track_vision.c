@@ -28,6 +28,82 @@ static int16_t track_clamp_error(int64_t value)
 
 #include "track_near_route.inc"
 
+/* 仅补回紧贴已确认赛道、在近处单侧出画的连续行。宽度来自同帧
+ * 双边界行，不拿屏幕边框当赛道边界，也不跨黑带寻找远处白块。 */
+static void track_extend_clipped_near(const uint8_t *binary, uint16_t cols,
+                                      uint16_t roi_end, uint16_t roi_rows,
+                                      uint16_t maximum_width, uint16_t jump_per_row,
+                                      track_vision_result_t *out)
+{
+    uint16_t base = roi_end;
+    for (uint16_t y = roi_end; y > roi_end - roi_rows; --y)
+        if (out->row_valid[y - 1U]) { base = y - 1U; break; }
+    if (base == roi_end || out->valid_rows < track_max(4U, roi_rows / 5U)) return;
+
+    /* 取离出画位置最近的一段完整赛道估计透视路宽斜率。 */
+    uint16_t far = base;
+    for (uint16_t y = base; y > roi_end - roi_rows &&
+         (uint16_t)(base - far) < roi_rows / 3U; --y)
+        if (out->row_valid[y - 1U]) far = y - 1U;
+    if (far == base || base - far < track_max(3U, roi_rows / 10U)) return;
+    const uint16_t base_width = out->right[base] - out->left[base] + 1U;
+    const uint16_t far_width = out->right[far] - out->left[far] + 1U;
+    int32_t width_slope_q8 = ((int32_t)base_width - far_width) * 256 / (base - far);
+    if (width_slope_q8 < 0) width_slope_q8 = 0;
+    if (width_slope_q8 > (int32_t)cols * 512 / roi_rows)
+        width_slope_q8 = (int32_t)cols * 512 / roi_rows;
+
+    uint16_t previous_left = out->left[base], previous_right = out->right[base];
+    uint16_t previous_center = out->center[base];
+    for (uint16_t y = base + 1U; y < roi_end; ++y)
+    {
+        const uint8_t *pixels = binary + (uint32_t)y * cols;
+        uint16_t x = 0U, chosen_left = 0U, chosen_right = 0U;
+        uint8_t matches = 0U;
+        while (x < cols)
+        {
+            while (x < cols && pixels[x] == 0U) ++x;
+            if (x == cols) break;
+            uint16_t start = x, end = x, white = 0U;
+            uint8_t gap = 0U;
+            while (x < cols)
+            {
+                if (pixels[x]) { ++white; end = x; gap = 0U; }
+                else if (++gap > 2U) { ++x; break; }
+                ++x;
+            }
+            uint16_t visible_width = end - start + 1U;
+            if ((start == 0U) == (end == cols - 1U) ||
+                (uint32_t)white * 4U < (uint32_t)visible_width * 3U ||
+                !route_member(y, (start + end) / 2U)) continue;
+            if (end == cols - 1U && track_distance(start, previous_left) <= jump_per_row)
+            { chosen_left = start; chosen_right = end; ++matches; }
+            if (start == 0U && track_distance(end, previous_right) <= jump_per_row)
+            { chosen_left = start; chosen_right = end; ++matches; }
+        }
+        if (matches != 1U) break;
+        int32_t projected_width = (int32_t)base_width +
+            width_slope_q8 * (int32_t)(y - base) / 256;
+        /* 行宽与斜率的整数舍入可相差 1~2 像素；贴边首行也允许进入。 */
+        if (projected_width > maximum_width ||
+            projected_width + 2 < (int32_t)(chosen_right - chosen_left + 1U)) break;
+        int32_t center = chosen_right == cols - 1U ?
+            (int32_t)chosen_left + projected_width / 2 :
+            (int32_t)chosen_right - projected_width / 2;
+        if (center <= 0 || center >= (int32_t)cols - 1 ||
+            track_distance((uint16_t)center, previous_center) > jump_per_row) break;
+        out->left[y] = chosen_left;
+        out->right[y] = chosen_right;
+        out->center[y] = (uint16_t)center;
+        out->row_valid[y] = 1U;
+        ++out->valid_rows;
+        if (out->no_candidate_rows != 0U) --out->no_candidate_rows;
+        previous_left = chosen_left;
+        previous_right = chosen_right;
+        previous_center = (uint16_t)center;
+    }
+}
+
 void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
                           track_vision_result_t *out)
 {
@@ -181,22 +257,22 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
         previous_center = best_center;
         have_previous = 1U;
 
+    }
+
+    track_extend_clipped_near(binary, cols, roi_end, roi_rows, maximum_width,
+                              jump_per_row, out);
+    /* 近端补线之后按最终行级结果重算统计，保证画出的中线与控制值同源。 */
+    near_count = far_count = 0U;
+    near_sum = far_sum = near_width_sum = far_width_sum = weighted_sum = weight_total = 0U;
+    for (uint16_t row = roi_start; row < roi_end; ++row)
+    {
+        if (!out->row_valid[row]) continue;
+        uint16_t center = out->center[row];
+        uint16_t width = out->right[row] - out->left[row] + 1U;
         uint16_t weight = 2U;
-        if (row >= near_start)
-        {
-            ++near_count;
-            near_sum += best_center;
-            near_width_sum += best_right - best_left + 1U;
-            weight = 3U;
-        }
-        else if (row < far_end)
-        {
-            ++far_count;
-            far_sum += best_center;
-            far_width_sum += best_right - best_left + 1U;
-            weight = 1U;
-        }
-        weighted_sum += (uint32_t)best_center * weight;
+        if (row >= near_start) { ++near_count; near_sum += center; near_width_sum += width; weight = 3U; }
+        else if (row < far_end) { ++far_count; far_sum += center; far_width_sum += width; weight = 1U; }
+        weighted_sum += (uint32_t)center * weight;
         weight_total += weight;
     }
 
@@ -254,6 +330,27 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     out->heading = track_clamp_error(
         ((int64_t)far_sum * near_count - (int64_t)near_sum * far_count) * 2000 /
         ((int64_t)near_count * far_count * (cols - 1U)));
+}
+
+void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols)
+{
+    if (binary == NULL || rows < 10U || rows > TRACK_VISION_MAX_ROWS ||
+        cols < 16U || cols > TRACK_VISION_MAX_COLS || route_seed_ambiguous)
+        return;
+    const uint16_t first = (uint16_t)((uint32_t)rows * 30U / 100U);
+    const uint16_t end = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U);
+    uint8_t have_road = 0U;
+    for (uint16_t y = first; y < end && !have_road; ++y)
+        for (uint16_t x = 0U; x < cols; ++x)
+            if (route_member(y, x)) { have_road = 1U; break; }
+    if (!have_road) return;
+
+    /* 上方不是控制视野；中间只显示近处赛道所属的白色连通区域。
+     * 下方车体区域保持原样，便于核对相机安装和遮挡位置。 */
+    memset(binary, 0, (uint32_t)first * cols);
+    for (uint16_t y = first; y < end; ++y)
+        for (uint16_t x = 0U; x < cols; ++x)
+            if (!route_member(y, x)) binary[(uint32_t)y * cols + x] = 0U;
 }
 
 

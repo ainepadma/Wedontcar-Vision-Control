@@ -186,7 +186,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.3.3-beta T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u\r\n",
+        "#CAM FW=0.4.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -461,9 +461,11 @@ static void screen_draw_track_overlay(void)
         if (right >= TRACK_DISPLAY_WIDTH)
             right = TRACK_DISPLAY_WIDTH - 1U;
 
-        if (mode == TRACK_PATH_NORMAL || (track_result.raw_flags[row] & 1U))
+        if ((mode == TRACK_PATH_NORMAL && left_source > 0U) ||
+            (mode != TRACK_PATH_NORMAL && (track_result.raw_flags[row] & 1U)))
             tft180_draw_point(left, y, RGB565_RED);
-        if (mode == TRACK_PATH_NORMAL || (track_result.raw_flags[row] & 2U))
+        if ((mode == TRACK_PATH_NORMAL && right_source < MT9V03X_W - 1U) ||
+            (mode != TRACK_PATH_NORMAL && (track_result.raw_flags[row] & 2U)))
             tft180_draw_point(right, y, RGB565_RED);
         tft180_draw_point(center, y, RGB565_BLUE);
     }
@@ -589,6 +591,8 @@ int main(void)
 
             if (screen_enabled)
             {
+                // 仅清理本帧屏幕预览的游离亮斑；循迹、环岛和原始图传已使用未遮蔽图像。
+                track_vision_filter_display((uint8_t *)image, MT9V03X_H, MT9V03X_W);
                 tft180_displayimage03x((uint8_t *)image,
                                        TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT);
                 screen_draw_track_overlay();
