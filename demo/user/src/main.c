@@ -1,7 +1,7 @@
 #include "main.h" // 所有引脚信息更改在main.h里改宏
 #include "zf_device_imu660rb.h"
 
-// 暗场先轻量去噪，再使用原始大津阈值区分白轨和蓝底。
+// 暗部增强及地面区域阈值；上方灯光与底部车体不参与阈值估计。
 // C13 控制启停；C14 开启时需赛道有效，关闭时只保留人工停机和 PWM 硬限幅。
 #define CAMERA_SEND_RAW 1
 #define CAMERA_TUNING_EXPOSURE 1024U
@@ -83,6 +83,7 @@ void Init()
     // C13 每 10ms 独立扫描，停机键不依赖摄像头或屏幕刷新。
     // 电机上电保持零输出，必须先松开按键再有效按下才启动。
     gpio_init(MOTOR_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
+    gpio_init(PROTECTION_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     gpio_init(SPEED_MODE_TOGGLE_KEY, GPI, GPIO_HIGH, GPI_PULL_UP);
     track_runtime_init();
     pit_ms_init(PIT_CH0, SPEED_CONTROL_PERIOD_MS);
@@ -95,12 +96,13 @@ void Init()
 
 uint8_t image[MT9V03X_H][MT9V03X_W];
 uint32_t hist_gram[256];
-static uint8_t image_filter_scratch[2U * MT9V03X_W];
+static uint8_t image_filter_scratch[5U * MT9V03X_W];
+static image_track_preprocess_state_t image_preprocess_state;
 static track_vision_result_t track_result;
 
 // 冻结一帧快照，由 UART 中断慢慢发送。传输中不覆盖，忙时跳过新预览帧。
 // 数据头及诊断文本也纳入同一队列，禁止 printf 插入正在发送的图像。
-#define CAMERA_DIAGNOSTIC_SIZE 768U
+#define CAMERA_DIAGNOSTIC_SIZE 1024U
 static uint8_t camera_tx_packet[CAMERA_DIAGNOSTIC_SIZE + 12U + sizeof(image)];
 static volatile uint32_t camera_tx_position;
 static volatile uint32_t camera_tx_length;
@@ -184,7 +186,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.3.1 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d\r\n",
+        "#CAM FW=0.4.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -213,7 +215,21 @@ static void assistant_send_image(void)
         (int)snapshot_imu.acc_up, (int)snapshot_imu.gyro_y_raw,
         (int)(snapshot_imu.yaw_rate_dps * 10.0f),
         (unsigned int)snapshot_ring.phase, (int)snapshot_ring.direction,
-        (int)(snapshot_ring.yaw_progress_deg * 10.0f));
+        (int)(snapshot_ring.yaw_progress_deg * 10.0f),
+        (unsigned int)(snapshot_ring.kind == TRACK_RING_270 ? 270U :
+                       (snapshot_ring.kind == TRACK_RING_360 ? 360U : 0U)),
+        (unsigned int)snapshot_ring.entry_seen, (unsigned int)snapshot_ring.entry_passed,
+        (unsigned int)snapshot_ring.exit_seen, (unsigned int)snapshot_ring.path_mode,
+        (unsigned int)snapshot_ring.fault, (unsigned int)track_result.ring.junction_near,
+        (unsigned int)track_result.ring.left_open, (unsigned int)track_result.ring.right_open,
+        (unsigned int)track_result.ring.forward_visible,
+        (unsigned int)track_result.ring.left_quality, (unsigned int)track_result.ring.right_quality,
+        (int)snapshot_ring.selected_path.error, (int)snapshot_ring.selected_path.heading,
+        (unsigned int)track_result.ring.entry_score, (unsigned int)track_result.ring.exit_score,
+        (unsigned int)track_result.ring.near_paired, (unsigned int)track_result.ring.near_open,
+        (unsigned int)track_result.ring.topology[0], (unsigned int)track_result.ring.topology[1],
+        (unsigned int)track_result.ring.white_band, (unsigned int)track_result.ring.straight_support,
+        (unsigned int)snapshot_ring.line_active);
     if (prefix_length <= 0 || (uint32_t)prefix_length >= CAMERA_DIAGNOSTIC_SIZE)
         return;
     memcpy(camera_tx_packet + prefix_length, header, sizeof(header));
@@ -322,34 +338,66 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 118, "C12-  C15+     ");
     tft180_show_string(0, 134, motor_enabled ? "C13 SERVO ON  " : "C13 SERVO OFF ");
 #else
-    snprintf(line, sizeof(line), "E:%4d H:%4d", (int)track_result.error,
-             (int)track_result.heading);
-    tft180_show_string(0, 102, line);
     uint32_t primask = interrupt_global_disable();
-    uint8_t ring_phase = ring_control.phase;
-    float ring_yaw = ring_control.yaw_progress_deg;
+    uint8_t display_mode = ring_control.path_mode;
+    ring_control_state_t ring_display = ring_control;
     interrupt_global_enable(primask);
-    snprintf(line, sizeof(line), "Q%3u R%u C%u Y%3d",
-             (unsigned int)track_result.confidence,
+    const track_path_observation_t display_path = (ring_display.action_locked || ring_display.fault) ?
+        ring_display.selected_path : track_result.ring.path[display_mode];
+    snprintf(line, sizeof(line), "E:%4d H:%4d", (int)display_path.error,
+             (int)display_path.heading);
+    tft180_show_string(0, 102, line);
+    primask = interrupt_global_disable();
+    uint8_t ring_phase = ring_control.kind == TRACK_RING_360 ? ring_control.zore360_stage : ring_control.phase;
+    uint8_t ring_kind = ring_control.kind;
+    uint8_t entry_seen = ring_control.entry_seen, exit_seen = ring_control.exit_seen;
+    interrupt_global_enable(primask);
+    // T0=unknown, T270/T360=confirmed. I=entry latch; X=exit latch.
+    snprintf(line, sizeof(line), "R%u T%3u I%u X%u",
              (unsigned int)ring_phase,
-             (unsigned int)track_result.ring_candidate,
-             (int)ring_yaw);
+             (unsigned int)(ring_kind == TRACK_RING_270 ? 270U :
+                           (ring_kind == TRACK_RING_360 ? 360U : 0U)),
+             (unsigned int)entry_seen, (unsigned int)exit_seen);
     tft180_show_string(0, 118, line);
     if (motor_feedback_fault)
     {
-        snprintf(line, sizeof(line), "ENC WARN:%u    ",
-                 (unsigned int)motor_feedback_fault);
+        const char *fault_format = track_stop_reason == TRACK_STOP_NO_FEEDBACK
+            ? "NO FB:%u      " : (track_stop_reason == TRACK_STOP_OVERSPEED
+            ? "AIR/FAST:%u   " : "ENC ERR:%u    ");
+        snprintf(line, sizeof(line), fault_format, (unsigned int)motor_feedback_fault);
         tft180_show_string(0, 134, line);
     }
-    else if (motor_enabled && !track_ready)
-        tft180_show_string(0, 134, "CAM WARN      ");
-    else if (motor_enabled && (!imu_navigation.device_ready ||
-                               !imu_navigation.bias_ready))
-        tft180_show_string(0, 134, "IMU WARN      ");
+    else if (track_stop_reason == TRACK_STOP_RING)
+        tft180_show_string(0, 134, "RING FAULT     ");
+    else if (motor_enabled && ring_display.kind == TRACK_RING_360 && ring_display.phase == RING_STATE_INSIDE)
+    {
+        snprintf(line, sizeof(line), "Z%u VISUAL RING ", (unsigned int)ring_display.zore360_stage);
+        tft180_show_string(0, 134, line);
+    }
+    else if (ring_display.completed_mask != 0U && (!ring_display.entry_seen || ring_display.phase == RING_STATE_COOLDOWN))
+    {
+        snprintf(line, sizeof(line), "D360:%u D270:%u ",
+                 (unsigned int)ring_display.completed_360, (unsigned int)ring_display.completed_270);
+        tft180_show_string(0, 134, line);
+    }
+    else if (motor_enabled && ring_control.entry_seen && ring_control.phase != RING_STATE_COOLDOWN)
+        tft180_show_string(0, 134,
+            ring_control.phase == RING_STATE_APPROACH ? "ENTRY READY   " :
+            ring_control.phase == RING_STATE_ENTERING ? "ENTRY PASS    " :
+            ring_control.phase == RING_STATE_EXIT_APPROACH ? "EXIT READY    " :
+            ring_control.phase == RING_STATE_EXITING ? "EXIT PASS     " : "RING INSIDE   ");
+    else if (!protection_enabled)
+        tft180_show_string(0, 134, motor_enabled
+            ? (speed_full_enabled ? "FREE FULL     " : "FREE LOW      ")
+            : "C13 FREE RUN  ");
     else if (motor_enabled)
-        tft180_show_string(0, 134, speed_full_enabled ? "RUN FULL      " : "RUN LOW       ");
+        tft180_show_string(0, 134, speed_full_enabled ? "TRACK FULL    " : "TRACK LOW     ");
+    else if (track_stop_reason == TRACK_STOP_LOST)
+        tft180_show_string(0, 134, "TRACK LOST    ");
+    else if (track_stop_reason == TRACK_STOP_STALE)
+        tft180_show_string(0, 134, "CAM TIMEOUT   ");
     else
-        tft180_show_string(0, 134, "C13 START     ");
+        tft180_show_string(0, 134, track_ready ? "READY C13:GO  " : "WAIT TRACK    ");
 #endif
     screen_stats_dirty = 0;
 }
@@ -357,20 +405,53 @@ static void screen_draw_stats(void)
 // 只叠加到 TFT，不改动二值图或控制器输入：红色为左右边沿，蓝色为判定中线。
 static void screen_draw_track_overlay(void)
 {
+    uint32_t primask = interrupt_global_disable();
+    ring_control_state_t ring_snapshot = ring_control;
+    uint8_t mode = ring_snapshot.path_mode;
+    interrupt_global_enable(primask);
+    if (ring_snapshot.fault) return;
+    if(ring_snapshot.action_locked && ring_snapshot.kind==TRACK_RING_360) {
+        for(unsigned row=ring_snapshot.zore360_top;row<ring_snapshot.zore360_end;++row) {
+            if((int)row<=ring_snapshot.zore360_off || row>=MT9V03X_H) continue;
+            float cx=constrain_float((float)ring_snapshot.zore360_centers[row],0.f,(float)(MT9V03X_W-1U));
+            uint16_t x=(uint16_t)(cx*(float)TRACK_DISPLAY_WIDTH/(float)MT9V03X_W);
+            uint16_t y=(uint16_t)(row*TRACK_DISPLAY_HEIGHT/MT9V03X_H);
+            tft180_draw_point(x,y,RGB565_BLUE);
+        }
+        return;
+    }
     for (uint16_t y = 0U; y < TRACK_DISPLAY_HEIGHT; ++y)
     {
         const uint16_t row = (uint16_t)((uint32_t)y * MT9V03X_H /
                                         TRACK_DISPLAY_HEIGHT);
-        if (!track_result.row_valid[row])
-            continue;
+        uint16_t selected_center;
+        if (ring_snapshot.line_active)
+        {
+            float row_percent = (float)row * 100.0f / (float)MT9V03X_H;
+            if (row_percent < RING_GUIDE_FAR_PERCENT || row_percent >= RING_GUIDE_NEAR_PERCENT) continue;
+            float nx = ring_control_line_x(&ring_snapshot, row_percent);
+            selected_center = (uint16_t)((nx + 1000.0f) * (float)(MT9V03X_W - 1U) / 2000.0f);
+        }
+        else if (mode > TRACK_PATH_NORMAL && mode < TRACK_PATH_COUNT)
+        {
+            if (!track_result.guide_valid[mode - 1U][row]) continue;
+            selected_center = track_result.guide_center[mode - 1U][row];
+        }
+        else
+        {
+            if (!track_result.row_valid[row]) continue;
+            selected_center = track_result.center[row];
+        }
 
-        uint16_t left = (uint16_t)(((uint32_t)track_result.left[row] *
+        uint16_t left_source = mode != TRACK_PATH_NORMAL ? track_result.raw_left[row] : track_result.left[row];
+        uint16_t right_source = mode != TRACK_PATH_NORMAL ? track_result.raw_right[row] : track_result.right[row];
+        uint16_t left = (uint16_t)(((uint32_t)left_source *
                                     TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
                                    MT9V03X_W);
-        uint16_t center = (uint16_t)(((uint32_t)track_result.center[row] *
+        uint16_t center = (uint16_t)(((uint32_t)selected_center *
                                       TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
                                      MT9V03X_W);
-        uint16_t right = (uint16_t)(((uint32_t)track_result.right[row] *
+        uint16_t right = (uint16_t)(((uint32_t)right_source *
                                      TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
                                     MT9V03X_W);
         if (left >= TRACK_DISPLAY_WIDTH)
@@ -380,11 +461,17 @@ static void screen_draw_track_overlay(void)
         if (right >= TRACK_DISPLAY_WIDTH)
             right = TRACK_DISPLAY_WIDTH - 1U;
 
-        tft180_draw_point(left, y, RGB565_RED);
-        tft180_draw_point(right, y, RGB565_RED);
+        if ((mode == TRACK_PATH_NORMAL && left_source > 0U) ||
+            (mode != TRACK_PATH_NORMAL && (track_result.raw_flags[row] & 1U)))
+            tft180_draw_point(left, y, RGB565_RED);
+        if ((mode == TRACK_PATH_NORMAL && right_source < MT9V03X_W - 1U) ||
+            (mode != TRACK_PATH_NORMAL && (track_result.raw_flags[row] & 2U)))
+            tft180_draw_point(right, y, RGB565_RED);
         tft180_draw_point(center, y, RGB565_BLUE);
     }
 }
+
+static track_ring_vision_state_t ring_vision_model;
 
 int main(void)
 {
@@ -476,18 +563,27 @@ int main(void)
             if (screen_enabled)
                 assistant_prepare_raw_image();
 #endif
-            // 两行缓存原地均值，原始图传快照已冻结；不覆盖 CSI 缓冲。
-            if (!image_mean3x3((uint8_t *)image, MT9V03X_H, MT9V03X_W,
-                               image_filter_scratch, sizeof(image_filter_scratch)))
-                memset(image, 0, sizeof(image)); // 参数异常时输出无效图，保持停机。
-            // 保持已烧录并经用户脱机确认可启动的全图 Otsu 方案。
-            get_hist_gram((uint8_t *)image, MT9V03X_H, MT9V03X_W, hist_gram);
-            unsigned int adjusted_threshold = get_threshold_otsu(hist_gram);
-            unsigned char threshold = (unsigned char)MAX(1U, MIN(254U, adjusted_threshold));
-            camera_threshold = threshold;
-            binaryzation_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, threshold);
+            // 复用普通/环岛共同需要的地面范围，滤波也不跨越该范围边界。
+            // 灰度图传快照保持原始值，屏幕与所有视觉识别共用处理后的二值图。
+            if (!image_track_preprocess_stable((uint8_t *)image, MT9V03X_H, MT9V03X_W,
+                    (uint16_t)((uint32_t)MT9V03X_H * RING_SEARCH_START_PERCENT / 100U),
+                    (uint16_t)((uint32_t)MT9V03X_H * TRACK_VISION_ROI_END_PERCENT / 100U),
+                    image_filter_scratch, sizeof(image_filter_scratch), hist_gram, &camera_threshold,
+                    &image_preprocess_state, timer_get(GPT_TIM_1)))
+            {
+                memset(image, 0, sizeof(image));
+                camera_threshold = 255U;
+            }
             // 在叠加调试线之前识别赛道，并将一帧完整结果交给控制中断。
             track_vision_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, &track_result);
+            uint32_t ring_view_mask=interrupt_global_disable();
+            uint8_t ring_view_stage=ring_control.action_locked ?
+                (ring_control.kind==TRACK_RING_360 ? ring_control.zore360_stage : 255U) : 0U;
+            int8_t ring_view_direction=ring_control.direction;
+            interrupt_global_enable(ring_view_mask);
+            track_ring_360_set_active(ring_view_stage,ring_view_direction);
+            track_ring_vision_process(&ring_vision_model, (uint8_t *)image,
+                                      MT9V03X_H, MT9V03X_W, &track_result);
             track_result.frame_number = frame_number;
             if (!track_result.valid)
                 ++invalid_vision_frames;
@@ -495,6 +591,8 @@ int main(void)
 
             if (screen_enabled)
             {
+                // 仅清理本帧屏幕预览的游离亮斑；循迹、环岛和原始图传已使用未遮蔽图像。
+                track_vision_filter_display((uint8_t *)image, MT9V03X_H, MT9V03X_W);
                 tft180_displayimage03x((uint8_t *)image,
                                        TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT);
                 screen_draw_track_overlay();

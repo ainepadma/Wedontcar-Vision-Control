@@ -45,7 +45,7 @@ int16 encoder_data_3 = 0;
 int16 encoder_data_4 = 0;
 volatile uint8_t motor_enabled = 0;
 volatile uint8_t motor_feedback_fault = 0;
-volatile uint8_t protection_enabled = 0;
+volatile uint8_t protection_enabled = AUTOMATIC_PROTECTION_DEFAULT;
 volatile uint8_t speed_full_enabled = 0;
 volatile uint8_t track_ready = 0;
 volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
@@ -54,11 +54,14 @@ volatile uint8_t imu_device_status = IMU660RB_RESULT_ERROR;
 imu_navigation_state_t imu_navigation;
 ring_control_state_t ring_control;
 static motor_switch_t motor_switch_state;
+static motor_switch_t protection_switch_state;
 static motor_switch_t speed_mode_switch_state;
 #if SERVO_CENTER_TEST_MODE
 static motor_switch_t servo_decrease_switch_state;
 static float servo_center_test_angle = SERVO_MOTOR_CENTER;
 #endif
+static motor_feedback_watchdog_t motor_feedback_watchdog;
+static motor_overspeed_watchdog_t motor_overspeed_watchdog;
 static track_control_state_t track_control;
 static volatile uint32_t control_clock_ms;
 static uint32_t consumed_frame_generation;
@@ -69,6 +72,7 @@ static volatile struct
     int16_t error, heading;
     uint8_t confidence, valid, ring_candidate;
     int8_t ring_direction;
+    track_ring_observation_t ring;
     uint32_t observed_ms, generation;
 } track_mailbox;
 
@@ -86,11 +90,20 @@ void track_runtime_init(void)
     };
     track_control_init(&track_control, &config);
     ring_control_init(&ring_control);
+    protection_switch_state.enabled = AUTOMATIC_PROTECTION_DEFAULT;
     speed_mode_switch_state.enabled = 0U;
-    // 只由 C13 启停：图像/IMU/编码器异常仅供诊断，不触发自动停车。
-    track_control_set_loss_stop(&track_control, 0U);
-    protection_enabled = 0U;
+    protection_enabled = AUTOMATIC_PROTECTION_DEFAULT;
+    track_control_set_loss_stop(&track_control, protection_enabled);
+    ring_control_set_protection(&ring_control, protection_enabled);
     speed_full_enabled = 0U;
+#if SERVO_CENTER_TEST_MODE
+    // 中值测试不依赖赛道就绪；C13 只用于开关舵机输出。
+    track_control_set_loss_stop(&track_control, 0U);
+    protection_switch_state.enabled = 0U;
+    protection_enabled = 0U;
+#endif
+    motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+    motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
     speed_target = 0.0f;
     motor_enabled = 0;
     track_servo_tenths = (int16_t)(track_control.servo_angle * 10.0f);
@@ -106,6 +119,7 @@ void track_frame_publish(const track_vision_result_t *result)
     track_mailbox.valid = result->valid;
     track_mailbox.ring_candidate = result->ring_candidate;
     track_mailbox.ring_direction = result->ring_direction;
+    track_mailbox.ring = result->ring;
     track_mailbox.observed_ms = control_clock_ms;
     ++track_mailbox.generation;
     __DMB();
@@ -131,6 +145,7 @@ void PIT_IRQHandler(void)
     {
         control_clock_ms += SPEED_CONTROL_PERIOD_MS;
         uint8_t was_running = motor_enabled;
+        uint8_t yaw_fresh = 0U;
         if (imu_navigation.device_ready)
         {
             imu660rb_sample_t sample;
@@ -138,6 +153,7 @@ void PIT_IRQHandler(void)
             imu_device_status = imu_result;
             if (imu_result == IMU660RB_RESULT_OK)
             {
+                yaw_fresh = 1U;
                 imu_navigation_observe(&imu_navigation,
                     sample.acc_x, sample.acc_y, sample.acc_z,
                     sample.gyro_x, sample.gyro_y, sample.gyro_z,
@@ -146,20 +162,11 @@ void PIT_IRQHandler(void)
             else if (imu_result == IMU660RB_RESULT_ERROR)
                 imu_navigation.device_ready = 0U;
         }
-        if (track_mailbox.generation != consumed_frame_generation)
-        {
-            consumed_frame_generation = track_mailbox.generation;
-            track_control_observe(&track_control, track_mailbox.error, track_mailbox.heading,
-                                  track_mailbox.confidence, track_mailbox.valid,
-                                  track_mailbox.observed_ms);
-            ring_control_observe(&ring_control, track_mailbox.ring_candidate,
-                                 track_mailbox.ring_direction,
-                                 track_mailbox.valid, track_mailbox.confidence,
-                                 control_clock_ms);
-        }
         // 独立于图像主循环：30ms 去抖，长按不连发，上电按住不启动。
         uint8_t button_pressed = motor_switch_sample(&motor_switch_state,
                                                      gpio_get_level(MOTOR_TOGGLE_KEY) == GPIO_LOW);
+        uint8_t protection_pressed = motor_switch_sample(&protection_switch_state,
+            gpio_get_level(PROTECTION_TOGGLE_KEY) == GPIO_LOW);
         uint8_t speed_mode_pressed = motor_switch_sample(&speed_mode_switch_state,
             gpio_get_level(SPEED_MODE_TOGGLE_KEY) == GPIO_LOW);
 #if SERVO_CENTER_TEST_MODE
@@ -170,6 +177,15 @@ void PIT_IRQHandler(void)
                                                        SERVO_CALIBRATION_MIN,
                                                        SERVO_CALIBRATION_MAX);
 #endif
+        if (protection_pressed)
+        {
+            track_control_set_loss_stop(&track_control,
+                                        protection_switch_state.enabled);
+            protection_enabled = track_control.loss_stop_enabled;
+            motor_feedback_fault = 0U;
+            motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+            motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
+        }
         if (speed_mode_pressed)
         {
 #if SERVO_CENTER_TEST_MODE
@@ -185,11 +201,16 @@ void PIT_IRQHandler(void)
         if (button_pressed)
         {
             motor_feedback_fault = 0;
-            // C13 是唯一的停车命令；上电默认停机，短按启动，再按停车。
+            /* C13 intent is based on the state at tick entry. If a protection
+             * already stopped the car in this tick, the same press must not
+             * toggle it back on. */
             if (was_running)
                 track_control_stop(&track_control, TRACK_STOP_MANUAL);
             else
+            {
+                ring_control_init(&ring_control); // C13 starts a new run: clear faults and 270/360 completion records
                 track_control_toggle(&track_control, control_clock_ms);
+            }
         }
 
         // 获取编码器读数
@@ -202,31 +223,86 @@ void PIT_IRQHandler(void)
         speed_real_r = encoder_data_2;
         speed_real = speed_real_r; // 兼容旧调试变量，明确仅代表右轮。
 
-        // 编码器反向只提示，不停车；速度 PID 的输出仍受非负和满量程限制。
-        motor_feedback_fault = track_control.running
-            ? motor_feedback_fault_mask(encoder_data_1, encoder_data_2) : 0U;
+        // 编码器极性要按实车标定，不能随 DIR 盲目取反或用绝对值掩盖。
+        // 任何反号反馈都先锁定停机，禁止它进入正目标 PID 导致输出增大。
+        if (protection_enabled && track_control.running &&
+            motor_feedback_fault_mask(encoder_data_1, encoder_data_2))
+        {
+            motor_feedback_fault = motor_feedback_fault_mask(encoder_data_1, encoder_data_2);
+            track_control_stop(&track_control, TRACK_STOP_ENCODER);
+        }
 
+        // 编码器反号优先；用上一周期实际 PWM 对应本周期读到的反馈。
+        // 单轮连续 500ms 有驱动却几乎无正计数，锁停两轮，防止 PI 堵转加力。
+        uint8_t no_feedback = motor_feedback_watchdog_sample(&motor_feedback_watchdog,
+            (uint8_t)(protection_enabled && was_running && track_control.running),
+            encoder_data_1, encoder_data_2, (uint32_t)speed_pwm_l, (uint32_t)speed_pwm_r);
+        if (no_feedback)
+        {
+            motor_feedback_fault = no_feedback;
+            track_control_stop(&track_control, TRACK_STOP_NO_FEEDBACK);
+        }
+
+        uint8_t overspeed = motor_overspeed_watchdog_sample(&motor_overspeed_watchdog,
+            (uint8_t)(protection_enabled && was_running && track_control.running),
+            encoder_data_1, encoder_data_2, speed_target);
+        if (overspeed)
+        {
+            motor_feedback_fault = overspeed;
+            track_control_stop(&track_control, TRACK_STOP_OVERSPEED);
+        }
+
+        // Ring decision selects the path BEFORE ordinary steering observes it.
+        ring_control_set_protection(&ring_control, protection_enabled);
         ring_control_tick(&ring_control, track_control.running,
-                          (uint8_t)(imu_navigation.device_ready &&
-                                    imu_navigation.bias_ready),
-                          imu_navigation.yaw_rate_dps,
-                          control_clock_ms);
-        /* A visual candidate must not pull the car off the white centerline.
-         * Normal vision steering remains active until IMU yaw confirms that
-         * the chassis has physically entered the ring. */
-        track_control_set_turn_override(&track_control,
-            ring_control_turn_override(&ring_control));
-        // 环岛候选时就提前提高方向环响应，但仍沿视觉中线转向。
-        const uint8_t ring_steering = (uint8_t)(
-            ring_control.phase == RING_STATE_CANDIDATE ||
-            ring_control.phase == RING_STATE_ENTERING ||
-            ring_control.phase == RING_STATE_INSIDE ||
-            ring_control.phase == RING_STATE_EXITING);
-        track_control.config.kp = ring_steering ? TRACK_RING_STEER_KP : TRACK_STEER_KP;
-        track_control.config.kd = ring_steering ? TRACK_RING_STEER_KD : TRACK_STEER_KD;
-        track_control.config.max_servo_rate_deg_s = ring_steering
-            ? TRACK_RING_SERVO_RATE_DEG_S : TRACK_SERVO_RATE_DEG_S;
+            (uint8_t)(yaw_fresh && imu_navigation.bias_ready),
+            imu_navigation.yaw_rate_dps,
+            0.5f * ((float)(encoder_data_1 > 0 ? encoder_data_1 : 0) +
+                    (float)(encoder_data_2 > 0 ? encoder_data_2 : 0)), control_clock_ms);
+        uint8_t fresh_ring_frame = (uint8_t)(track_mailbox.generation != consumed_frame_generation);
+        if (fresh_ring_frame || ring_control.control_refresh)
+        {
+            consumed_frame_generation = track_mailbox.generation;
+            const track_ring_observation_t vision = track_mailbox.ring;
+#if !SERVO_CENTER_TEST_MODE
+            if (fresh_ring_frame)
+                ring_control_observe(&ring_control, &vision, track_mailbox.observed_ms,
+                                     track_control.running);
+            const track_path_observation_t path = ring_control_select_path(&ring_control, &vision);
+#else
+            const track_path_observation_t path = vision.path[TRACK_PATH_NORMAL];
+#endif
+            if (ring_control.reset_tracking_history)
+            {
+                /* Ring handoff only: no ordinary-frame reset or parameter change. */
+                if (path.valid)
+                {
+                    track_control.filtered_error = (float)path.error;
+                    track_control.filtered_heading = (float)path.heading;
+                }
+                track_control.derivative = 0.0f;
+                track_control.derivative_ready = 0U;
+                ring_control.reset_tracking_history = 0U;
+            }
+            track_control_observe(&track_control, path.error, path.heading,
+                                  path.confidence, path.valid,
+                                  fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
+        }
+        if (protection_enabled && ring_control.fault)
+            track_control_stop(&track_control, TRACK_STOP_RING);
         track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
+        if (ring_control_guidance_active(&ring_control) &&
+            output.target_speed > TRACK_SPEED_CURVE_MIN)
+            output.target_speed = TRACK_SPEED_CURVE_MIN;
+        if (output.running && ring_control.action_locked && ring_control.kind == TRACK_RING_360 && !ring_control.fault)
+        {
+            ring_control_360_motion(&ring_control, SERVO_MOTOR_CENTER,
+                track_control.config.servo_left, track_control.config.servo_right,
+                track_control.config.speed_straight, &output.servo_angle, &output.target_speed);
+            track_control.servo_angle = output.servo_angle;
+        }
+        if (ring_control.line_active)
+            output.target_speed *= constrain_float(RING_STRAIGHT_SPEED_SCALE, 0.1f, 1.0f);
         motor_enabled = output.running;
         motor_switch_state.enabled = output.running;
         track_ready = output.ready;
@@ -236,24 +312,23 @@ void PIT_IRQHandler(void)
 #else
         track_servo_tenths = (int16_t)(output.servo_angle * 10.0f);
 #endif
-        const float speed_scale =
+        const float target_counts =
 #if SERVO_CENTER_TEST_MODE
             0.0f;
 #else
-            (speed_full_enabled ? TRACK_SPEED_FULL_SCALE : 1.0f);
+            output.target_speed * (speed_full_enabled ? TRACK_SPEED_FULL_SCALE : 1.0f);
 #endif
-        const float target_counts = output.target_speed * speed_scale;
-        const float target_counts_l = output.target_speed_left * speed_scale;
-        const float target_counts_r = output.target_speed_right * speed_scale;
         speed_target = target_counts;
         if (button_pressed || was_running != motor_enabled)
         {
-            // 只有 C13 引起的运行状态切换需要清零驱动和 PID 历史。
+            // 用户停机、丢线、停帧和编码器故障都通过同一条归零路径。
             pwm_set_duty(MOTOR1_PWM, 0);
             pwm_set_duty(MOTOR2_PWM, 0);
             // 只清历史，不重新加载参数，保留将来分别标定的左右轮增益。
             Pid_Reset(&speed_pid_l);
             Pid_Reset(&speed_pid_r);
+            motor_feedback_watchdog_reset(&motor_feedback_watchdog);
+            motor_overspeed_watchdog_reset(&motor_overspeed_watchdog);
             speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
         }
 
@@ -272,14 +347,19 @@ void PIT_IRQHandler(void)
             pwm_set_duty(SERVO_MOTOR_PWM, SERVO_MOTOR_DUTY(output.servo_angle));
             // 保留已实测极性与曲率降速关系；有界 PI 增加低速负载补偿。
             // t=1 表示一个 10ms 采样周期，不是 1 秒；P=50、I=0.2、D=0。
-            speed_pwm_l = PidLocCtrl(&speed_pid_l, target_counts_l - speed_real_l, 1.f);
+            // 差速仅拆分轮速目标：右转左轮快，左转右轮快；公共速度不变。
+            const float differential = (ring_control.action_locked && ring_control.kind == TRACK_RING_360) ? 0.0f : Speed_Differential_Delta(target_counts,
+                (output.servo_angle - SERVO_MOTOR_CENTER) * SERVO_DIR);
+            const float target_left = target_counts + differential;
+            const float target_right = target_counts - differential;
+            speed_pwm_l = PidLocCtrl(&speed_pid_l, target_left - speed_real_l, 1.f);
             // 最终驱动防线仍保留非负/硬件满量程限制，并同步内部输出状态。
             speed_pwm_l = constrain_float(speed_pwm_l, 0.0f, speed_OUTMAX);
             speed_pid_l.out = speed_pwm_l;
             gpio_set_level(MOTOR1_DIR, MOTOR1_FORWARD_DIR_LEVEL);
             pwm_set_duty(MOTOR1_PWM, (uint32_t)speed_pwm_l);
 
-            speed_pwm_r = PidLocCtrl(&speed_pid_r, target_counts_r - speed_real_r, 1.f);
+            speed_pwm_r = PidLocCtrl(&speed_pid_r, target_right - speed_real_r, 1.f);
             speed_pwm_r = constrain_float(speed_pwm_r, 0.0f, speed_OUTMAX);
             speed_pid_r.out = speed_pwm_r;
             gpio_set_level(MOTOR2_DIR, MOTOR2_FORWARD_DIR_LEVEL);
