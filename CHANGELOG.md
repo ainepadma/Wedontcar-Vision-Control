@@ -1,5 +1,37 @@
 # 更新日志
 
+## Beta v0.4.0-1021：弯道近端中线与预览去噪
+
+### 一、版本定位
+
+2026-10-21，从 `10-21-medium` 的 `7b2319a` 创建 `1021-yubao` 独立开发分支。应用户要求将版本设为 `0.4.0`。目标是修正弯道近处单边出画时中线偏差、减轻过早入弯，并处理画面左侧游离亮斑。本版尚未烧录或实车验收。
+
+### 二、普通弯道中线
+
+此前近处赛道只有一侧边界出画时，寻线会舍弃这些行，远处直线更容易主导控制。本版只在同帧有足够双边界路宽依据、可见边界逐行连续且属于近端关联道路时，补算单侧出画行的中线；随后按最终有效行重新计算误差和远近走向。无依据的单边、歧义分支和断开的远处白区仍拒绝。屏幕叠线不再把画面边框伪装成真实赛道边沿。
+
+### 三、前瞻与二值噪声
+
+- `TRACK_HEADING_WEIGHT` 从 `2.00` 降到 `1.60`，普通 PD 的 `KP=0.020`、`KD=0.0005` 不变。降低远处走向对舵机的影响，减轻提前入弯；实际合适值仍需低速上车验证。
+- `image_clean_binary()` 在原有孤立像素清理外，只删除四周完全为黑色的孤立 2×2 白点；相连赛道、较长白线和黑色小孔保留。
+- 屏幕预览在本帧视觉计算和结果发布之后隐藏未连到近处赛道的白斑。该步骤不改变循迹/环岛输入、控制结果或发送前冻结的原始灰度帧；它不是摄像头硬件噪声修复。
+
+### 四、保持不变
+
+环岛开关仍默认 `RING_FEATURE_ENABLED=0`；C13 启停、C14 默认关闭的可切换保护、C15 速度档、舵机角度与 120°/s 限速、双轮 PI 和 PWM 2000 上限均未调整。Keil 工程配置和个人 IDE 状态未作为本版修改提交。
+
+### 五、验证结果
+
+新增弯道近端和屏幕去噪回归；相关主机测试 `test_curved_edge`、`test_ground_preprocess`、`test_near_route`、`test_track_control`、`test_line_following`、`test_track_preprocess`、`test_track_vision`、`test_vision_stability` 均通过。使用 Arm Compiler 6.24 对 `track_control.c`、`track_vision.c`、`img_process.c` 做 `-fsyntax-only` 检查通过；`git diff --check` 通过。
+
+Keil 目标 `nor_sdram_zf_dtcm` 完整 Rebuild：**0 Error(s), 2 Warning(s)**。两条警告均来自未修改的 SDK `libraries/sdk/utilities/debug_console/fsl_debug_console.c:1628`，是 `HUGE_VAL` 在当前浮点选项下的告警。程序大小 Code 59604、RO-data 9120、RW-data 240、ZI-data 437692；`demo/mdk/Objects/rt1064.axf` SHA-256 为 `94B59BA02DA5CC8F188DC5095685BAADE085C59AFC75E3239F15289407D1D1BB`。构建日志保存在本机 `C:/Users/FXK/AppData/Local/Temp/1021-yubao-keil-rebuild.log`，不提交生成物。未烧录、未实车测试。
+
+### 六、已知问题与待办
+
+1. 低速复测照片所示弯道的入弯时机和中线误差，并记录 C14/C15 状态；必要时再小步调整航向权重。
+2. 若原始灰度图左侧仍有大量亮斑，应检查曝光、镜头反光和安装遮挡；预览过滤不会改变原始相机噪声。
+3. 完成烧录与架空测试；遗留环岛测试需先按当前开关和 API 更新，再评估合并门禁。
+
 ## Beta v0.3.3-1021：地面稳定预处理、近端路线关联与环岛默认关闭
 
 ### 一、版本定位与来源
