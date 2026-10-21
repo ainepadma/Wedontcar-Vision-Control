@@ -214,7 +214,7 @@ git branch -d 分支名称
 
 - 版本号形如 `v0.3.2`：第三位是调参、小修和文档；第二位是功能或行为变化；第一位需要项目负责人手动授权（沿用 v0.0.0 的约定）。
 - `CHANGELOG.md` 标题格式：`## Beta v0.3.2-1020：一句话主题`，日期使用版本发布当天（MM-DD）。
-- `version.yml` 必须与 CHANGELOG 同步：`version` 写版本号，`date` 写发布日期，`commit` 写该版本对应的 `main` 提交短哈希。
+- `version.yml` 必须与 CHANGELOG 同步：`version` 写版本号，`date` 写发布日期，`commit` 通常写已知发布提交短哈希；提交自身无法预先包含自己的哈希，本版使用明确标注的提交标题，按下文命令解析。合并主线时可另记合并提交。
 
 ### CHANGELOG 结构
 
@@ -256,3 +256,22 @@ git branch -d 分支名称
 - [ ] `CHANGELOG.md`、`version.yml`、`SUMMARY.md` 已同步
 - [ ] PR 描述包含修改内容、修改原因和验证情况
 - [ ] 合并后 `main` 与 `origin/main` 一致
+
+
+## 十二、0.3.3-beta 分支交接约定
+
+本版交付在 `10-21-medium`，维护此算法应从该分支创建个人分支，不要从旧文件夹的版本号判断基线。提交标题 `passmedium` 为本次明确指定的发布名称。
+
+```powershell
+git fetch origin
+git switch -c 1021-yourname origin/10-21-medium
+git log -1 --format="%H %s" --grep="^passmedium$" origin/10-21-medium
+```
+
+`version.yml` 本版的 `commit` 为标题 `passmedium`，`commit_kind=subject`；用上面命令查实际 SHA。`base_commit` 为上传前分支头，不是本版本提交。后续版本统一更新 `version.yml`、`main.c` 的 `#CAM FW=`、CHANGELOG、README 和 SUMMARY，避免固件与文档版本脱节。
+
+- 保留源目录源码与 `.inc` 依赖，不提交 Objects、Listings、主机测试 exe 或个人 IDE 状态。
+- C14 保护和环岛开关是两个独立配置；复现记录必须包含两者以及 C15 档位。
+- 部分脚本默认编译器路径属于原作者电脑，运行时传 `-Compiler gcc`。
+- 默认关闭的环岛功能不能直接按开启条件断言；测试须按配置分组，并先移除旧常量依赖。
+- 本版存在未通过的遗留测试；当前分支交接不代表达到“合并前检查清单”中的全部门禁，合并主线前应处理失败项。

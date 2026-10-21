@@ -1,13 +1,14 @@
 #include "track_control.h"
 
-#include <float.h>
 #include <math.h>
 #include <string.h>
 
 #define TRACK_READY_FRAMES 3U
 #define TRACK_MIN_CONFIDENCE 45U
+#define TRACK_LOST_STOP_FRAMES 3U
+#define TRACK_STALE_MS 150U
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
-#define TRACK_HEADING_WEIGHT 1.50
+#define TRACK_HEADING_WEIGHT 2.00
 
 static double track_clamp(double value, double low, double high)
 {
@@ -74,7 +75,6 @@ void track_control_stop(track_control_state_t *state, uint8_t reason)
                              ? reason : TRACK_STOP_MANUAL;
     state->derivative = 0.0f;
     state->derivative_ready = 0U;
-    state->turn_override = 0;
     if (state->stop_reason == TRACK_STOP_LOST ||
         state->stop_reason == TRACK_STOP_STALE ||
         state->stop_reason == TRACK_STOP_ENCODER ||
@@ -82,14 +82,6 @@ void track_control_stop(track_control_state_t *state, uint8_t reason)
         state->stop_reason == TRACK_STOP_OVERSPEED)
         state->ready_frames = 0U;
     /* Keep the last angle: the hardware owner can disable PWM on a stop. */
-}
-
-void track_control_set_turn_override(track_control_state_t *state,
-                                     int8_t direction)
-{
-    if (state == NULL)
-        return;
-    state->turn_override = direction > 0 ? 1 : (direction < 0 ? -1 : 0);
 }
 
 void track_control_observe(track_control_state_t *state, int16_t error,
@@ -203,9 +195,7 @@ void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled)
 track_control_output_t track_control_tick(track_control_state_t *state,
                                          uint32_t now_ms)
 {
-    track_control_output_t output = {
-        0U, 0U, TRACK_STOP_NOT_READY, 0.0f, 0.0f, 0.0f, 0.0f
-    };
+    track_control_output_t output = {0U, 0U, TRACK_STOP_NOT_READY, 0.0f, 0.0f};
     uint32_t elapsed;
     if (state == NULL)
         return output;
@@ -228,21 +218,7 @@ track_control_output_t track_control_tick(track_control_state_t *state,
     if (state->running)
     {
         const track_control_config_t *cfg = &state->config;
-        if (state->turn_override != 0)
-        {
-            const double desired = state->turn_override > 0 ?
-                                   cfg->servo_left : cfg->servo_right;
-            const double max_step =
-                (double)cfg->max_servo_rate_deg_s * elapsed / 1000.0;
-            state->servo_angle = (float)track_clamp(desired,
-                (double)state->servo_angle - max_step,
-                (double)state->servo_angle + max_step);
-            state->servo_angle = (float)track_clamp(state->servo_angle,
-                fmin((double)cfg->servo_left, (double)cfg->servo_right),
-                fmax((double)cfg->servo_left, (double)cfg->servo_right));
-            output.target_speed = cfg->speed_curve_min;
-        }
-        else if (state->frame_valid)
+        if (state->frame_valid)
         {
             /* Curve-centre placement can produce a small cross-track error with a
              * large look-ahead heading. Let heading dominate in that case so the
@@ -281,31 +257,5 @@ track_control_output_t track_control_tick(track_control_state_t *state,
     output.ready = track_ready(state, now_ms);
     output.stop_reason = state->stop_reason;
     output.servo_angle = state->servo_angle;
-    output.target_speed_left = output.target_speed;
-    output.target_speed_right = output.target_speed;
-    if (output.running && output.target_speed > 0.0f)
-    {
-        const double center = state->config.servo_center;
-        const double angle = state->servo_angle;
-        double turn = 0.0;
-        if (angle < center)
-        {
-            const double right_span = center - state->config.servo_right;
-            if (right_span > 0.0)
-                turn = (center - angle) / right_span;
-        }
-        else if (angle > center)
-        {
-            const double left_span = state->config.servo_left - center;
-            if (left_span > 0.0)
-                turn = -(angle - center) / left_span;
-        }
-        turn = track_clamp(turn, -1.0, 1.0);
-        const double delta = (double)output.target_speed * TRACK_DIFF_GAIN * turn;
-        output.target_speed_left = (float)track_clamp(
-            (double)output.target_speed + delta, 0.0, FLT_MAX);
-        output.target_speed_right = (float)track_clamp(
-            (double)output.target_speed - delta, 0.0, FLT_MAX);
-    }
     return output;
 }

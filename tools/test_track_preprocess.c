@@ -11,18 +11,17 @@
 } } while (0)
 
 static uint8_t pixels[TRACK_VISION_MAX_ROWS * TRACK_VISION_MAX_COLS];
-static uint8_t scratch[2U * TRACK_VISION_MAX_COLS];
+static uint8_t scratch[5U * TRACK_VISION_MAX_COLS];
 static track_vision_result_t result;
 
 static uint8_t process(uint16_t rows, uint16_t cols)
 {
     uint32_t histogram[256];
-    CHECK(image_mean3x3(pixels, rows, cols, scratch, sizeof(scratch)));
-    get_hist_gram(pixels, rows, cols, histogram);
-    uint8_t threshold = get_threshold_otsu(histogram);
-    if (threshold < 1U) threshold = 1U;
-    if (threshold > 254U) threshold = 254U;
-    binaryzation_process(pixels, rows, cols, threshold);
+    uint8_t threshold;
+    CHECK(image_track_preprocess(pixels, rows, cols,
+        (uint16_t)((uint32_t)rows * 30U / 100U),
+        (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U),
+        scratch, sizeof(scratch), histogram, &threshold));
     track_vision_process(pixels, rows, cols, &result);
     return threshold;
 }

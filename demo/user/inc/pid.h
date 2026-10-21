@@ -7,6 +7,18 @@
  */
 #define SPEED_CONTROL_PERIOD_MS (10U)
 
+/* 左右轮差速强度：增大则差速增大；0 关闭差速。
+ * 参考 HFK 的 V*(半轮距/R)，以舵机偏角近似前轮转角：
+ * delta = V * SPEED_DIFF_GAIN * tan(angle)。0.4 仅为初始调试值。
+ * 单轮增减最多为公共目标的 50%，保持前进且两轮平均目标不变。
+ */
+#define SPEED_DIFF_GAIN (0.4f)
+
+/* right_angle_deg > 0 means right turn; returns signed left-wheel increment.
+ * Right wheel uses the opposite increment. Input speed is counts/10ms.
+ */
+float Speed_Differential_Delta(float target, float right_angle_deg);
+
 typedef struct
 {
     float                kp;                    //P

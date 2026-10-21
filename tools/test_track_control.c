@@ -29,70 +29,9 @@ static void check_output(track_control_output_t output)
 {
     CHECK(isfinite(output.servo_angle));
     CHECK(isfinite(output.target_speed));
-    CHECK(isfinite(output.target_speed_left));
-    CHECK(isfinite(output.target_speed_right));
     CHECK(output.target_speed >= 0.0f);
-    CHECK(output.target_speed_left >= 0.0f);
-    CHECK(output.target_speed_right >= 0.0f);
     if (!output.running)
-    {
         CHECK(output.target_speed == 0.0f);
-        CHECK(output.target_speed_left == 0.0f);
-        CHECK(output.target_speed_right == 0.0f);
-    }
-}
-
-static void test_wheel_speed_differential(void)
-{
-    track_control_state_t state;
-    track_control_init(&state, &config);
-    qualify(&state, 0, 0, 0U);
-    track_control_toggle(&state, 40U);
-    track_control_output_t output = track_control_tick(&state, 50U);
-    CHECK(output.target_speed_left == output.target_speed);
-    CHECK(output.target_speed_right == output.target_speed);
-
-    state.config.max_servo_rate_deg_s = 0.0f;
-    state.servo_angle = config.servo_right;
-    output = track_control_tick(&state, 60U);
-    CHECK(fabsf(output.target_speed_left - output.target_speed * 1.10f) < 0.0001f);
-    CHECK(fabsf(output.target_speed_right - output.target_speed * 0.90f) < 0.0001f);
-
-    state.servo_angle = config.servo_left;
-    output = track_control_tick(&state, 70U);
-    CHECK(fabsf(output.target_speed_left - output.target_speed * 0.90f) < 0.0001f);
-    CHECK(fabsf(output.target_speed_right - output.target_speed * 1.10f) < 0.0001f);
-    puts("PASS centered and symmetric +/-10% wheel-speed differential");
-}
-
-static void test_ring_turn_override(void)
-{
-    track_control_state_t state;
-    track_control_init(&state, &config);
-    qualify(&state, 0, 0, 0U);
-    track_control_toggle(&state, 40U);
-
-    track_control_set_turn_override(&state, 1);
-    track_control_output_t output = track_control_tick(&state, 50U);
-    CHECK(output.running && output.servo_angle > config.servo_center);
-    CHECK(output.target_speed == config.speed_curve_min);
-    CHECK(output.target_speed_left < output.target_speed_right);
-
-    state.servo_angle = config.servo_center;
-    track_control_set_turn_override(&state, -1);
-    output = track_control_tick(&state, 60U);
-    CHECK(output.servo_angle < config.servo_center);
-    CHECK(output.target_speed_left > output.target_speed_right);
-
-    track_control_set_turn_override(&state, 0);
-    output = track_control_tick(&state, 70U);
-    CHECK(output.servo_angle > config.servo_right);
-    track_control_set_turn_override(&state, 100);
-    CHECK(state.turn_override == 1);
-    track_control_set_turn_override(&state, -100);
-    CHECK(state.turn_override == -1);
-    track_control_set_turn_override(NULL, 1);
-    puts("PASS ring direction overrides steering with existing limits/differential");
 }
 
 static void test_readiness(void)
@@ -242,7 +181,6 @@ static void test_loss_stale_and_encoder(void)
         track_control_init(&state, &config);
         qualify(&state, 0, 0, 0U);
         track_control_toggle(&state, 40U);
-        uint32_t check_ms = 200U;
         if (reasons[i] == TRACK_STOP_LOST)
         {
             track_control_observe(&state, 0, 0, 100U, 0U, 60U);
@@ -251,35 +189,31 @@ static void test_loss_stale_and_encoder(void)
             track_control_observe(&state, 0, 0, 100U, 0U, 80U);
             CHECK(state.running && state.lost_frames == 2U);
             track_control_observe(&state, 0, 0, 100U, 0U, 100U);
-            track_control_observe(&state, 0, 0, 100U, 0U, 120U);
-            CHECK(state.running && state.lost_frames == 4U);
-            track_control_observe(&state, 0, 0, 100U, 0U, 140U);
         }
         else if (reasons[i] == TRACK_STOP_STALE)
         {
-            CHECK(track_control_tick(&state, 290U).running);
-            (void)track_control_tick(&state, 291U);
-            check_ms = 300U;
+            CHECK(track_control_tick(&state, 190U).running);
+            (void)track_control_tick(&state, 191U);
         }
         else
             track_control_stop(&state, reasons[i]);
-        track_control_output_t output = track_control_tick(&state, check_ms);
+        track_control_output_t output = track_control_tick(&state, 200U);
         CHECK(!output.running && !output.ready && output.stop_reason == reasons[i]);
         check_output(output);
-        qualify(&state, 0, 0, check_ms + 20U);
-        output = track_control_tick(&state, check_ms + 70U);
+        qualify(&state, 0, 0, 220U);
+        output = track_control_tick(&state, 270U);
         CHECK(!output.running && output.ready && output.stop_reason == reasons[i]);
         check_output(output);
-        track_control_toggle(&state, check_ms + 70U);
-        CHECK(track_control_tick(&state, check_ms + 80U).running);
+        track_control_toggle(&state, 270U);
+        CHECK(track_control_tick(&state, 280U).running);
     }
     track_control_state_t state;
     track_control_init(&state, &config);
     qualify(&state, 0, 0, 0U);
     track_control_toggle(&state, 40U);
-    track_control_observe(&state, 0, 0, 100U, 1U, 300U);
+    track_control_observe(&state, 0, 0, 100U, 1U, 200U);
     CHECK(!state.running && state.stop_reason == TRACK_STOP_STALE && state.ready_frames == 1U);
-    puts("PASS 5-frame lost grace, stale/reverse/no-feedback latches, recovery needs toggle");
+    puts("PASS 3-frame lost grace, stale/reverse/no-feedback latches, recovery needs toggle");
 }
 
 static void test_default_speed_profile(void)
@@ -390,7 +324,7 @@ static void test_loss_stop_reenable_reasons(void)
     track_control_set_loss_stop(&state, 0U);
     qualify(&state, 0, 0, 0U);
     track_control_toggle(&state, 40U);
-    CHECK(track_control_tick(&state, 291U).running);
+    CHECK(track_control_tick(&state, 191U).running);
     track_control_set_loss_stop(&state, 1U);
     CHECK(!state.running && state.stop_reason == TRACK_STOP_STALE);
 
@@ -416,7 +350,7 @@ static void test_invalid_frame_holds_steering(void)
     output = track_control_tick(&state, 50U);
     held_angle = output.servo_angle;
 
-    /* The first bad frames use the grace period but must not continue
+    /* The first two bad frames use the grace period but must not continue
      * steering toward a target derived from stale geometry. */
     track_control_observe(&state, 0, 0, 0U, 0U, 60U);
     output = track_control_tick(&state, 60U);
@@ -436,16 +370,16 @@ static void test_invalid_frame_holds_steering(void)
     held_angle = track_control_tick(&state, 50U).servo_angle;
     state.derivative = 123.0f;
     state.derivative_ready = 1U;
-    output = track_control_tick(&state, 291U);
+    output = track_control_tick(&state, 191U);
     CHECK(output.running && output.target_speed == config.speed_curve_min);
     CHECK(output.servo_angle == held_angle);
     CHECK(state.derivative == 0.0f && !state.derivative_ready);
 
     /* The first recovered frame starts a new derivative sequence and remains
      * subject to the configured servo slew limit. */
-    track_control_observe(&state, 1000, 0, 100U, 1U, 300U);
+    track_control_observe(&state, 1000, 0, 100U, 1U, 200U);
     CHECK(state.derivative == 0.0f && state.derivative_ready);
-    output = track_control_tick(&state, 301U);
+    output = track_control_tick(&state, 201U);
     CHECK(fabsf(output.servo_angle - held_angle) <=
           config.max_servo_rate_deg_s * 0.01001f);
     puts("PASS invalid/stale frames hold steering and recovery resets derivative");
@@ -464,8 +398,8 @@ static void test_timing_and_pd(void)
     track_control_observe(&state, 0, 0, 100U, 1U, 30U);
     CHECK(fabsf(state.filtered_error - (2000.0f / 3.0f)) < 0.001f);
     CHECK(fabsf(state.derivative - (-12500.0f / 3.0f)) < 0.01f);
-    CHECK(track_control_tick(&state, 280U).running);
-    CHECK(!track_control_tick(&state, 281U).running);
+    CHECK(track_control_tick(&state, 180U).running);
+    CHECK(!track_control_tick(&state, 181U).running);
     CHECK(state.stop_reason == TRACK_STOP_STALE);
     track_control_init(&state, &config);
     track_control_observe(&state, 0, 0, 100U, 1U, 100U);
@@ -490,10 +424,6 @@ static void test_timing_and_pd(void)
     track_control_observe(&state, -600, 0, 44U, 1U, 160U);
     CHECK(state.running && state.lost_frames == 2U);
     track_control_observe(&state, -600, 0, 44U, 1U, 180U);
-    CHECK(state.running && state.lost_frames == 3U);
-    track_control_observe(&state, -600, 0, 44U, 1U, 200U);
-    CHECK(state.running && state.lost_frames == 4U);
-    track_control_observe(&state, -600, 0, 44U, 1U, 220U);
     CHECK(!state.running && state.stop_reason == TRACK_STOP_LOST);
     puts("PASS uint32 wrap, actual-frame-dt filtered derivative, old/duplicate frames");
 }
@@ -535,7 +465,7 @@ static void test_randomized_invariants(void)
         CHECK(state.ready_frames <= 3U);
         CHECK(!output.running || state.frame_valid ||
               !state.loss_stop_enabled ||
-               (state.lost_frames > 0U && state.lost_frames < TRACK_LOST_STOP_FRAMES));
+              (state.lost_frames > 0U && state.lost_frames < 3U));
         CHECK(!output.running || (output.target_speed >= 10.0f && output.target_speed <= 20.0f));
         CHECK(previously_running || toggled || !output.running);
     }
@@ -581,8 +511,6 @@ static void test_abnormal_inputs(void)
 int main(void)
 {
     test_readiness();
-    test_wheel_speed_differential();
-    test_ring_turn_override();
     test_steering_and_speed();
     test_independent_servo_center();
     test_loss_stale_and_encoder();
