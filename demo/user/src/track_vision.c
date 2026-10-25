@@ -345,9 +345,8 @@ void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols)
             if (route_member(y, x)) { have_road = 1U; break; }
     if (!have_road) return;
 
-    /* 上方不是控制视野；中间只显示近处赛道所属的白色连通区域。
+    /* 上方保留二值图；中间只显示近处赛道所属的白色连通区域。
      * 下方车体区域保持原样，便于核对相机安装和遮挡位置。 */
-    memset(binary, 0, (uint32_t)first * cols);
     for (uint16_t y = first; y < end; ++y)
         for (uint16_t x = 0U; x < cols; ++x)
             if (!route_member(y, x)) binary[(uint32_t)y * cols + x] = 0U;
