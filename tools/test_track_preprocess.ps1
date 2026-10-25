@@ -13,6 +13,7 @@ $compilerCommand = Get-Command $Compiler -ErrorAction Stop
     (Join-Path $PSScriptRoot 'test_track_preprocess.c') `
     (Join-Path $projectRoot 'demo\user\src\img_process.c') `
     (Join-Path $projectRoot 'demo\user\src\track_vision.c') `
+    (Join-Path $projectRoot 'demo\user\src\ring_corner.c') `
     (Join-Path $projectRoot 'demo\user\src\track_control.c') `
     '-lm' '-o' $outputExecutable
 if ($LASTEXITCODE -ne 0) { throw "Track preprocessing compilation failed ($LASTEXITCODE)." }

@@ -8,7 +8,8 @@ foreach($suite in @('test_vision_stability','test_ring_feature_switch')) {
     $executable=Join-Path $outputDirectory ($suite+'.exe')
     $arguments=@('-std=c99','-Wall','-Wextra','-Werror','-Wshadow','-pedantic','-O2',
         '-I',(Join-Path $projectRoot 'demo\user\inc'),(Join-Path $PSScriptRoot ($suite+'.c')),
-        (Join-Path $projectRoot 'demo\user\src\track_vision.c'))
+        (Join-Path $projectRoot 'demo\user\src\track_vision.c'),
+        (Join-Path $projectRoot 'demo\user\src\ring_corner.c'))
     if($suite -eq 'test_vision_stability') {
         $arguments+=(Join-Path $projectRoot 'demo\user\src\img_process.c')
     } else {

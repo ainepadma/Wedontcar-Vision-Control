@@ -11,6 +11,7 @@ $compilerCommand = Get-Command $Compiler -ErrorAction Stop
     '-I' (Join-Path $projectRoot 'demo\user\inc') `
     (Join-Path $PSScriptRoot 'test_track_vision.c') `
     (Join-Path $projectRoot 'demo\user\src\track_vision.c') `
+    (Join-Path $projectRoot 'demo\user\src\ring_corner.c') `
     '-o' $outputExecutable
 if ($LASTEXITCODE -ne 0) { throw "Track-vision test compilation failed ($LASTEXITCODE)." }
 & $outputExecutable

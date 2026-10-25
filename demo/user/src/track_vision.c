@@ -353,7 +353,7 @@ void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols)
 }
 
 
-/* Ring-private ZORE-style observations. Never writes ordinary rows/scalars. */
+/* Ring-private native geometry. Never writes ordinary rows/scalars. */
 #include "ring_control.h"
 #include <math.h>
 #include <stdlib.h>
@@ -487,7 +487,12 @@ static void ring_edge_fit(const track_ring_vision_state_t *s,track_vision_result
     if(fabsf(nx)>750.f || fabsf(far)>850.f || fabsf(far-nx)>350.f) return;
     out->ring.edge_line_valid[side]=1U;out->ring.edge_near[side]=nx;out->ring.edge_far[side]=far;
 }
-#include "ring_360_zore.inc"
+/* Kept for source compatibility with old diagnostic tools. v0.6 computes all
+ * corner guide candidates from this frame, independent of the ISR stage. */
+void track_ring_360_set_active(uint8_t stage,int8_t direction)
+{
+    (void)stage;(void)direction;
+}
 
 void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binary,
                                uint16_t rows,uint16_t cols,track_vision_result_t *out)
@@ -539,7 +544,7 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     out->ring.model_ready=s->ready;
     out->ring.near_center=incoming*2000.f/(float)(cols-1U)-1000.f;
     ring_island(binary,rows,cols,&out->ring);
-    unsigned lc=0U,rc=0U,lo=0U,ro=0U,both=0U,near_l=0U,near_r=0U,near_open=0U;
+    unsigned lc=0U,rc=0U,lo=0U,ro=0U,near_l=0U,near_r=0U,near_open=0U;
     unsigned corridor=0U,central=0U,bar_run=0U,bar_best=0U;
     unsigned opened_nearest=start;
     uint32_t upper_white=0U,upper_black=0U;
@@ -562,7 +567,6 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
         if(rv) {++rc;if(y>=close) ++near_r;}
         if(ol) {++lo;out->ring.left_lost_row=(uint16_t)y;}
         if(orr) {++ro;out->ring.right_lost_row=(uint16_t)y;}
-        if(ol && orr) ++both;
         if(ol || orr) {opened_nearest=track_max((uint16_t)opened_nearest,(uint16_t)y);if(y>=close) ++near_open;}
         if((unsigned)(r-l+1U)*100U>=(unsigned)cols*RING_WHITE_BAND_PERCENT) {
             if(++bar_run>bar_best) bar_best=bar_run;
@@ -599,21 +603,28 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     out->ring.white_band=(uint8_t)(bar_best>=minimum);
     uint8_t structured=(uint8_t)(upper_white>cols/4U && upper_black>cols/4U);
     out->ring.wide_white=(uint8_t)(out->ring.white_band && structured);
-    int ring360_direction=ring_360_zore(binary,rows,cols,s,out);
-    if(ring360_direction!=0) {
-        /* A verified 360 ring takes precedence over an incidental broad band.
-         * Keep the 270 predicate itself unchanged in the following branch. */
-        out->ring.type_hint=TRACK_RING_360;out->ring.direction_hint=(int8_t)ring360_direction;
-        out->ring.entry_score=90U;out->ring.junction=1U;
-        if(ring360_direction>0) out->ring.left_open=1U;else out->ring.right_open=1U;
-        out->ring.paired_road=0U;
-    } else if(both>=minimum && (out->ring.wide_white || (out->ring.topology[0] && out->ring.topology[1]))) {
-        out->ring.type_hint=TRACK_RING_270;out->ring.entry_score=90U;
+    const ring_corner_context_t corner_context={out->raw_left,out->raw_right,out->raw_flags,
+        s->width_near,s->width_slope,s->center_near,s->center_slope,s->ready};
+    ring_corner_process(binary,rows,cols,&corner_context,&out->ring.corners);
+    out->ring.corners.frame_number=out->frame_number;
+    unsigned left_corners=out->ring.corners.count[0],right_corners=out->ring.corners.count[1];
+    if(left_corners || right_corners) out->ring.junction=1U;
+    /* Counts and paired topology select the element. Never classify by 90deg. */
+    if(left_corners==right_corners && left_corners>0U && left_corners<=2U) {
+        out->ring.type_hint=TRACK_RING_270;out->ring.entry_score=80U;
+    } else if((left_corners>0U && left_corners<3U && right_corners==0U) ||
+              (right_corners>0U && right_corners<3U && left_corners==0U)) {
+        unsigned side=left_corners ? 0U : 1U;
+        if(out->ring.corners.point[side][0].kind!=RING_CORNER_NONE) {
+            out->ring.type_hint=TRACK_RING_360;out->ring.entry_score=80U;
+            out->ring.direction_hint=side==0U ? 1 : -1;
+        }
     }
     if(out->ring.junction && ((out->ring.white_band && s->ready) || out->ring.wide_white || out->ring.topology[0] || out->ring.topology[1] ||
        (out->ring.straight_support>=55U && (out->ring.edge_line_valid[0] || out->ring.edge_line_valid[1]))))
         out->ring.exit_score=80U;
     out->ring.road_clear=(uint8_t)(!out->ring.junction && out->valid && out->confidence>=45U && out->ring.near_paired);
+    out->ring.corners.road_clear=out->ring.road_clear;
     out->ring.paired_road=out->ring.road_clear;
     for(unsigned mode=TRACK_PATH_LEFT;mode<TRACK_PATH_COUNT;++mode) ring_path_finish(out,mode,guide,end,cols);
     if(out->ring.path[0].valid && abs(out->heading)>=RING_VISUAL_TURN_MIN) out->ring.turn_hint=out->heading<0 ? 1 : -1;

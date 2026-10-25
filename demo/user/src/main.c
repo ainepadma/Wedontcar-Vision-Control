@@ -1,5 +1,6 @@
 #include "main.h" // 所有引脚信息更改在main.h里改宏
 #include "zf_device_imu660rb.h"
+#include <math.h>
 
 // 暗部增强及地面区域阈值；上方灯光与底部车体不参与阈值估计。
 // C13 控制启停；C14 开启时需赛道有效，关闭时只保留人工停机和 PWM 硬限幅。
@@ -102,10 +103,12 @@ uint32_t hist_gram[256];
 static uint8_t image_filter_scratch[5U * MT9V03X_W];
 static image_track_preprocess_state_t image_preprocess_state;
 static track_vision_result_t track_result;
+static ring_control_state_t screen_ring_snapshot;
+static uint8_t screen_guide_id,screen_guide_preview;
 
 // 冻结一帧快照，由 UART 中断慢慢发送。传输中不覆盖，忙时跳过新预览帧。
 // 数据头及诊断文本也纳入同一队列，禁止 printf 插入正在发送的图像。
-#define CAMERA_DIAGNOSTIC_SIZE 1024U
+#define CAMERA_DIAGNOSTIC_SIZE 1536U
 static uint8_t camera_tx_packet[CAMERA_DIAGNOSTIC_SIZE + 12U + sizeof(image)];
 static volatile uint32_t camera_tx_position;
 static volatile uint32_t camera_tx_length;
@@ -185,11 +188,12 @@ static void assistant_send_image(void)
     float snapshot_left_speed = speed_real_l, snapshot_right_speed = speed_real_r;
     float snapshot_left_pwm = speed_pwm_l, snapshot_right_pwm = speed_pwm_r;
     imu_navigation_state_t snapshot_imu = imu_navigation;
-    ring_control_state_t snapshot_ring = ring_control;
+    static ring_control_state_t snapshot_ring; /* Main-loop owned; keep ISR stack headroom. */
+    snapshot_ring = ring_control;
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.4.1-camera T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u\r\n",
+        "#CAM FW=0.6.1 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -232,7 +236,11 @@ static void assistant_send_image(void)
         (unsigned int)track_result.ring.near_paired, (unsigned int)track_result.ring.near_open,
         (unsigned int)track_result.ring.topology[0], (unsigned int)track_result.ring.topology[1],
         (unsigned int)track_result.ring.white_band, (unsigned int)track_result.ring.straight_support,
-        (unsigned int)snapshot_ring.line_active);
+        (unsigned int)snapshot_ring.line_active,
+        (unsigned int)track_result.ring.corners.count[0],(unsigned int)track_result.ring.corners.count[1],
+        (unsigned int)snapshot_ring.corner_stage,(unsigned int)snapshot_ring.corner_guide_id,
+        (unsigned long)snapshot_ring.corner_frame_number,(unsigned long)snapshot_ring.corner_guide_frame_number,
+        (unsigned int)snapshot_ring.corner_guide_held);
     if (prefix_length <= 0 || (uint32_t)prefix_length >= CAMERA_DIAGNOSTIC_SIZE)
         return;
     memcpy(camera_tx_packet + prefix_length, header, sizeof(header));
@@ -341,26 +349,22 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 118, "C12-  C15+     ");
     tft180_show_string(0, 134, motor_enabled ? "C13 SERVO ON  " : "C13 SERVO OFF ");
 #else
-    uint32_t primask = interrupt_global_disable();
-    uint8_t display_mode = ring_control.path_mode;
-    ring_control_state_t ring_display = ring_control;
-    interrupt_global_enable(primask);
-    const track_path_observation_t display_path = (ring_display.action_locked || ring_display.fault) ?
-        ring_display.selected_path : track_result.ring.path[display_mode];
-    snprintf(line, sizeof(line), "E:%4d H:%4d", (int)display_path.error,
-             (int)display_path.heading);
+    const ring_control_state_t *ring_display=&screen_ring_snapshot;
+    track_path_observation_t display_path=track_result.ring.path[TRACK_PATH_NORMAL];
+    if(screen_guide_id!=RING_GUIDE_NONE) {
+        const ring_corner_guide_t *g=&track_result.ring.corners.guide[screen_guide_id];
+        display_path=(track_path_observation_t){g->error,g->heading,g->valid,g->confidence};
+    }
+    else if(ring_display->action_locked) display_path=ring_display->selected_path;
+    snprintf(line, sizeof(line), "%cE%4d H%4d   ", screen_guide_preview ? 'P' :
+        (ring_display->corner_guide_held ? 'H' :
+        (ring_display->action_locked && ring_display->corner_frame_number!=track_result.frame_number ? '?' : ' ')),
+        /* H is a historical held path; ? is a control/image frame mismatch. */
+        (int)display_path.error,(int)display_path.heading);
     tft180_show_string(0, 102, line);
-    primask = interrupt_global_disable();
-    uint8_t ring_phase = ring_control.kind == TRACK_RING_360 ? ring_control.zore360_stage : ring_control.phase;
-    uint8_t ring_kind = ring_control.kind;
-    uint8_t entry_seen = ring_control.entry_seen, exit_seen = ring_control.exit_seen;
-    interrupt_global_enable(primask);
-    // T0=unknown, T270/T360=confirmed. I=entry latch; X=exit latch.
-    snprintf(line, sizeof(line), "R%u T%3u I%u X%u",
-             (unsigned int)ring_phase,
-             (unsigned int)(ring_kind == TRACK_RING_270 ? 270U :
-                           (ring_kind == TRACK_RING_360 ? 360U : 0U)),
-             (unsigned int)entry_seen, (unsigned int)exit_seen);
+    snprintf(line, sizeof(line), "L%u R%u S%u G%u  ",
+        (unsigned int)track_result.ring.corners.count[0],(unsigned int)track_result.ring.corners.count[1],
+        (unsigned int)ring_display->corner_stage,(unsigned int)screen_guide_id);
     tft180_show_string(0, 118, line);
     if (motor_feedback_fault)
     {
@@ -372,23 +376,22 @@ static void screen_draw_stats(void)
     }
     else if (track_stop_reason == TRACK_STOP_RING)
         tft180_show_string(0, 134, "RING FAULT     ");
-    else if (motor_enabled && ring_display.kind == TRACK_RING_360 && ring_display.phase == RING_STATE_INSIDE)
+    else if (motor_enabled && ring_display->action_locked)
     {
-        snprintf(line, sizeof(line), "Z%u VISUAL RING ", (unsigned int)ring_display.zore360_stage);
+        snprintf(line, sizeof(line), "%u %s ",ring_display->kind==TRACK_RING_270 ? 270U : 360U,
+            ring_display->corner_guide_held ? "HOLD    " :
+            (ring_display->phase==RING_STATE_INSIDE ? "INSIDE  " :
+             (ring_display->corner_guide_id==RING_GUIDE_270_CONNECT ? "CONNECT " : "GUIDE   ")));
         tft180_show_string(0, 134, line);
     }
-    else if (ring_display.completed_mask != 0U && (!ring_display.entry_seen || ring_display.phase == RING_STATE_COOLDOWN))
+    else if (ring_display->completed_mask != 0U && (!ring_display->entry_seen || ring_display->phase == RING_STATE_COOLDOWN))
     {
         snprintf(line, sizeof(line), "D360:%u D270:%u ",
-                 (unsigned int)ring_display.completed_360, (unsigned int)ring_display.completed_270);
+                 (unsigned int)ring_display->completed_360, (unsigned int)ring_display->completed_270);
         tft180_show_string(0, 134, line);
     }
-    else if (motor_enabled && ring_control.entry_seen && ring_control.phase != RING_STATE_COOLDOWN)
-        tft180_show_string(0, 134,
-            ring_control.phase == RING_STATE_APPROACH ? "ENTRY READY   " :
-            ring_control.phase == RING_STATE_ENTERING ? "ENTRY PASS    " :
-            ring_control.phase == RING_STATE_EXIT_APPROACH ? "EXIT READY    " :
-            ring_control.phase == RING_STATE_EXITING ? "EXIT PASS     " : "RING INSIDE   ");
+    else if (!motor_enabled && screen_guide_preview)
+        tft180_show_string(0,134,"PREVIEW STOP  ");
     else if (!protection_enabled)
         tft180_show_string(0, 134, motor_enabled
             ? (speed_full_enabled ? "FREE FULL     " : "FREE LOW      ")
@@ -405,72 +408,95 @@ static void screen_draw_stats(void)
     screen_stats_dirty = 0;
 }
 
-// 只叠加到 TFT，不改动二值图或控制器输入：红色为左右边沿，蓝色为判定中线。
+// Overlay only: red real boundaries/corners, yellow virtual boundaries, blue path.
+static void screen_point(float x,float y,uint16_t color)
+{
+    if(!isfinite(x) || !isfinite(y) || x<0.f || y<0.f || x>=(float)MT9V03X_W || y>=(float)MT9V03X_H) return;
+    uint16_t sx=(uint16_t)(x*(float)TRACK_DISPLAY_WIDTH/(float)MT9V03X_W);
+    uint16_t sy=(uint16_t)(y*(float)TRACK_DISPLAY_HEIGHT/(float)MT9V03X_H);
+    tft180_draw_point(sx,sy,color);
+}
+static uint8_t screen_preview_guide(const ring_corner_frame_t *v)
+{
+    if(v->count[0]==2U && v->count[1]==2U && v->guide[RING_GUIDE_270_CONNECT].valid)
+        return RING_GUIDE_270_CONNECT;
+    if(v->count[0]==1U && v->count[1]==1U && v->guide[RING_GUIDE_270_EXTEND].valid)
+        return RING_GUIDE_270_EXTEND;
+    if(v->count[0] && v->count[1]) return RING_GUIDE_NONE;
+    for(unsigned side=0U;side<2U;++side) {
+        if(v->count[side]==0U || v->count[side]>=3U) continue;
+        unsigned base=v->point[side][0].kind==RING_CORNER_A ? RING_GUIDE_A_LEFT : RING_GUIDE_B_BRANCH_LEFT;
+        if(v->guide[base+side].valid) return (uint8_t)(base+side);
+    }
+    return RING_GUIDE_NONE;
+}
 static void screen_draw_track_overlay(void)
 {
-    uint32_t primask = interrupt_global_disable();
-    ring_control_state_t ring_snapshot = ring_control;
-    uint8_t mode = ring_snapshot.path_mode;
+    uint32_t primask=interrupt_global_disable();
+    screen_ring_snapshot=ring_control;
+    uint8_t running=motor_enabled;
     interrupt_global_enable(primask);
-    if (ring_snapshot.fault) return;
-    if(ring_snapshot.action_locked && ring_snapshot.kind==TRACK_RING_360) {
-        for(unsigned row=ring_snapshot.zore360_top;row<ring_snapshot.zore360_end;++row) {
-            if((int)row<=ring_snapshot.zore360_off || row>=MT9V03X_H) continue;
-            float cx=constrain_float((float)ring_snapshot.zore360_centers[row],0.f,(float)(MT9V03X_W-1U));
-            uint16_t x=(uint16_t)(cx*(float)TRACK_DISPLAY_WIDTH/(float)MT9V03X_W);
-            uint16_t y=(uint16_t)(row*TRACK_DISPLAY_HEIGHT/MT9V03X_H);
-            tft180_draw_point(x,y,RGB565_BLUE);
-        }
-        return;
+    const ring_control_state_t *state=&screen_ring_snapshot;
+    const ring_corner_frame_t *corners=&track_result.ring.corners;
+    screen_guide_id=RING_GUIDE_NONE;screen_guide_preview=0U;
+    if(!running && !state->fault) {
+        screen_guide_id=screen_preview_guide(corners);
+        screen_guide_preview=(uint8_t)(screen_guide_id!=RING_GUIDE_NONE);
+    } else if(!state->fault && state->line_active && !state->corner_guide_held &&
+              state->corner_guide_frame_number==track_result.frame_number &&
+              state->corner_guide_id<RING_CORNER_GUIDE_COUNT &&
+              corners->guide[state->corner_guide_id].valid) {
+        screen_guide_id=state->corner_guide_id;
     }
-    for (uint16_t y = 0U; y < TRACK_DISPLAY_HEIGHT; ++y)
-    {
-        const uint16_t row = (uint16_t)((uint32_t)y * MT9V03X_H /
-                                        TRACK_DISPLAY_HEIGHT);
-        uint16_t selected_center;
-        if (ring_snapshot.line_active)
-        {
-            float row_percent = (float)row * 100.0f / (float)MT9V03X_H;
-            if (row_percent < RING_GUIDE_FAR_PERCENT || row_percent >= RING_GUIDE_NEAR_PERCENT) continue;
-            float nx = ring_control_line_x(&ring_snapshot, row_percent);
-            selected_center = (uint16_t)((nx + 1000.0f) * (float)(MT9V03X_W - 1U) / 2000.0f);
+    for(unsigned row=MT9V03X_H*RING_SEARCH_START_PERCENT/100U;
+        row<MT9V03X_H*RING_SEARCH_END_PERCENT/100U;++row) {
+        if(track_result.raw_flags[row]&1U) screen_point((float)track_result.raw_left[row],(float)row,RGB565_RED);
+        if(track_result.raw_flags[row]&2U) screen_point((float)track_result.raw_right[row],(float)row,RGB565_RED);
+        if(screen_guide_id==RING_GUIDE_NONE && !state->fault &&
+           (!state->action_locked || (state->path_mode==TRACK_PATH_NORMAL &&
+              !state->line_active && state->corner_frame_number==track_result.frame_number)) &&
+           track_result.row_valid[row])
+            screen_point((float)track_result.center[row],(float)row,RGB565_BLUE);
+    }
+    for(unsigned side=0U;side<2U;++side) for(unsigned i=0U;i<corners->count[side] && i<RING_CORNER_MAX_PER_SIDE;++i) {
+        const ring_corner_point_t *point=&corners->point[side][i];
+        if(point->quality<RING_CORNER_MIN_QUALITY || !isfinite(point->x) || !isfinite(point->y)) continue;
+        for(int d=-3;d<=3;++d) {
+            screen_point(point->x+(float)d,point->y,RGB565_RED);
+            screen_point(point->x,point->y+(float)d,RGB565_RED);
         }
-        else if (mode > TRACK_PATH_NORMAL && mode < TRACK_PATH_COUNT)
-        {
-            if (!track_result.guide_valid[mode - 1U][row]) continue;
-            selected_center = track_result.guide_center[mode - 1U][row];
+        char label[2]={point->kind==RING_CORNER_A ? 'A' : (point->kind==RING_CORNER_B ? 'B' : '?'),0};
+        unsigned x=(unsigned)(point->x*(float)TRACK_DISPLAY_WIDTH/(float)MT9V03X_W);
+        unsigned y=(unsigned)(point->y*(float)TRACK_DISPLAY_HEIGHT/(float)MT9V03X_H);
+        if(x+8U<TRACK_DISPLAY_WIDTH && y+16U<TRACK_DISPLAY_HEIGHT) tft180_show_string((uint16_t)x,(uint16_t)y,label);
+    }
+    if(screen_guide_id==RING_GUIDE_NONE) return;
+    const ring_corner_guide_t *guide=&corners->guide[screen_guide_id];
+    for(unsigned side=0U;side<2U;++side) {
+        const ring_corner_line_t *line=&guide->boundary[side];
+        if(!line->valid) continue;
+        float steps=fmaxf(fabsf(line->x1-line->x0),fabsf(line->y1-line->y0));
+        if(steps>(float)(MT9V03X_H+MT9V03X_W)) continue;
+        unsigned count=(unsigned)steps+1U;
+        for(unsigned i=0U;i<=count;++i) {
+            float t=(float)i/(float)count;
+            screen_point(line->x0+t*(line->x1-line->x0),line->y0+t*(line->y1-line->y0),RGB565_YELLOW);
         }
-        else
-        {
-            if (!track_result.row_valid[row]) continue;
-            selected_center = track_result.center[row];
+    }
+    unsigned y0=MT9V03X_H*RING_GUIDE_FAR_PERCENT/100U,y1=MT9V03X_H*RING_GUIDE_NEAR_PERCENT/100U-1U;
+    for(unsigned i=0U;i<RING_CORNER_CENTER_SAMPLES;++i) {
+        if(!(guide->center_valid&(1U<<i))) continue;
+        unsigned y=y0+i*(y1-y0)/(RING_CORNER_CENTER_SAMPLES-1U);
+        screen_point((float)guide->center[i],(float)y,RGB565_BLUE);
+        // Only connect consecutive valid samples; never bridge a rejected row gap.
+        if(i>0U && (guide->center_valid&(1U<<(i-1U))) && (guide->center_link_valid&(1U<<i))) {
+            unsigned previous=y0+(i-1U)*(y1-y0)/(RING_CORNER_CENTER_SAMPLES-1U);
+            for(unsigned row=previous+1U;row<y;++row) {
+                float t=(float)(row-previous)/(float)(y-previous);
+                float x=(float)guide->center[i-1U]+t*((float)guide->center[i]-(float)guide->center[i-1U]);
+                screen_point(x,(float)row,RGB565_BLUE);
+            }
         }
-
-        uint16_t left_source = mode != TRACK_PATH_NORMAL ? track_result.raw_left[row] : track_result.left[row];
-        uint16_t right_source = mode != TRACK_PATH_NORMAL ? track_result.raw_right[row] : track_result.right[row];
-        uint16_t left = (uint16_t)(((uint32_t)left_source *
-                                    TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
-                                   MT9V03X_W);
-        uint16_t center = (uint16_t)(((uint32_t)selected_center *
-                                      TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
-                                     MT9V03X_W);
-        uint16_t right = (uint16_t)(((uint32_t)right_source *
-                                     TRACK_DISPLAY_WIDTH + MT9V03X_W / 2U) /
-                                    MT9V03X_W);
-        if (left >= TRACK_DISPLAY_WIDTH)
-            left = TRACK_DISPLAY_WIDTH - 1U;
-        if (center >= TRACK_DISPLAY_WIDTH)
-            center = TRACK_DISPLAY_WIDTH - 1U;
-        if (right >= TRACK_DISPLAY_WIDTH)
-            right = TRACK_DISPLAY_WIDTH - 1U;
-
-        if ((mode == TRACK_PATH_NORMAL && left_source > 0U) ||
-            (mode != TRACK_PATH_NORMAL && (track_result.raw_flags[row] & 1U)))
-            tft180_draw_point(left, y, RGB565_RED);
-        if ((mode == TRACK_PATH_NORMAL && right_source < MT9V03X_W - 1U) ||
-            (mode != TRACK_PATH_NORMAL && (track_result.raw_flags[row] & 2U)))
-            tft180_draw_point(right, y, RGB565_RED);
-        tft180_draw_point(center, y, RGB565_BLUE);
     }
 }
 
@@ -582,15 +608,9 @@ int main(void)
             }
             // 在叠加调试线之前识别赛道，并将一帧完整结果交给控制中断。
             track_vision_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, &track_result);
-            uint32_t ring_view_mask=interrupt_global_disable();
-            uint8_t ring_view_stage=ring_control.action_locked ?
-                (ring_control.kind==TRACK_RING_360 ? ring_control.zore360_stage : 255U) : 0U;
-            int8_t ring_view_direction=ring_control.direction;
-            interrupt_global_enable(ring_view_mask);
-            track_ring_360_set_active(ring_view_stage,ring_view_direction);
+            track_result.frame_number = frame_number;
             track_ring_vision_process(&ring_vision_model, (uint8_t *)image,
                                       MT9V03X_H, MT9V03X_W, &track_result);
-            track_result.frame_number = frame_number;
             if (!track_result.valid)
                 ++invalid_vision_frames;
             track_frame_publish(&track_result);

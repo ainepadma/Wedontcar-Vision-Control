@@ -11,6 +11,7 @@ $compilerCommand = Get-Command $Compiler -ErrorAction Stop
     '-I' (Join-Path $projectRoot 'demo\user\inc') `
     (Join-Path $PSScriptRoot 'test_line_following.c') `
     (Join-Path $projectRoot 'demo\user\src\track_vision.c') `
+    (Join-Path $projectRoot 'demo\user\src\ring_corner.c') `
     (Join-Path $projectRoot 'demo\user\src\track_control.c') `
     (Join-Path $projectRoot 'demo\user\src\pid.c') `
     '-lm' '-o' $outputExecutable

@@ -71,7 +71,8 @@ static void test_display_noise(void)
     CHECK(image[10U * W + 30U] == 255U);
     track_vision_filter_display(image, H, W);
     CHECK(image[108U * W + 12U] == 0U);
-    CHECK(image[10U * W + 30U] == 0U);
+    /* v0.5 restores preview above 30%H; it stays outside control ROI. */
+    CHECK(image[10U * W + 30U] == 255U);
     CHECK(image[110U * W + center] == 255U);
     CHECK(result.error == error && result.heading == heading);
 }

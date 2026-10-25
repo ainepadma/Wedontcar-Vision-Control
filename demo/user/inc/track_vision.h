@@ -2,12 +2,13 @@
 #define TRACK_VISION_H
 
 #include <stdint.h>
+#include "ring_corner.h"
 
 /* 1: recognize and drive 270/360 rings; 0: ordinary line following only.
  * Change this single setting and rebuild. Does not disable ordinary curves.
  */
 #ifndef RING_FEATURE_ENABLED
-#define RING_FEATURE_ENABLED 0
+#define RING_FEATURE_ENABLED 1
 #endif
 #if RING_FEATURE_ENABLED != 0 && RING_FEATURE_ENABLED != 1
 #error "RING_FEATURE_ENABLED must be 0 or 1"
@@ -33,9 +34,9 @@ typedef enum track_vision_reject_t
     TRACK_VISION_REJECT_FAR_COVERAGE = 1U << 4
 } track_vision_reject_t;
 
-/* Ring geometry is extracted independently of the ordinary connected-run filter.
- * The map's one-sided junction is the 360 route; a two-sided crossing is 270.
- * UNKNOWN is retained until several observations agree; no course-order table.
+/* Ring candidates use native corner counts and directed contour arms.
+ * 270 uses bilateral 1/1 then 2/2; 360 uses ordered A/B/A/B events.
+ * Hints alone never advance the motion state machine.
  */
 typedef enum { TRACK_RING_UNKNOWN = 0, TRACK_RING_270, TRACK_RING_360 } track_ring_type_t;
 typedef enum {
@@ -62,7 +63,7 @@ typedef struct {
     uint8_t edge_line_valid[2], reference_valid, exit_reference_valid;
     float edge_near[2], edge_far[2];
     float reference_near, reference_far, exit_near, exit_far, near_center;
-    /* Pure per-frame ZORE outputs for each input stage and side. */
+    /* Legacy ZORE diagnostics retained for historical tooling; zero/inactive in v0.6. */
     uint8_t zore360_ready,zore360_next[2][10],zore360_done[2][10],zore360_det_valid[2][10];
     int16_t zore360_det[2][10],zore360_off[2][10];
     float zore360_error_scale[2][10];
@@ -78,6 +79,7 @@ typedef struct {
     uint32_t zore360_variance[2];
     uint16_t left_lost_row, right_lost_row, left_recover_row, right_recover_row;
     uint16_t left_corner_row, right_corner_row;
+    ring_corner_frame_t corners; /* v0.6 corner counts, directed arms and candidate boundaries. */
 } track_ring_observation_t;
 
 typedef struct {
@@ -130,7 +132,7 @@ typedef struct track_vision_result_t
  * reject_flags、近/远有效行和行级拒绝计数均属于本次调用，便于把诊断
  * 与同一帧图像绑定；frame_number 由采集方在处理完成后填写。
  * near/far_width 为对应 1/3 区域的平均白轨宽度；ring_candidate 仅表示
- * 远端显著张开的环岛候选，必须再经连续帧与 IMU 转向确认，不能单独接管控制。
+ * 远端显著张开的历史诊断；v0.6 由 corners 数量和时序决定环岛，不能单独接管控制。
  * error 约 [-1000, 1000]，赛道偏右为正；heading 远端向右为正。
  * rows 范围 [10, 480]，cols 范围 [16, 752]；其他尺寸/空输入安全拒绝。
  */
@@ -146,7 +148,7 @@ void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols);
  * Learns perspective width from narrow, paired near-field boundaries, freezes
  * the model through junctions. All image access stays outside the ISR.
  */
-void track_ring_360_set_active(uint8_t stage,int8_t direction); /* 0=normal, 255=other special element */
+void track_ring_360_set_active(uint8_t stage,int8_t direction); /* Legacy compatibility no-op in v0.6. */
 void track_ring_vision_init(track_ring_vision_state_t *state);
 void track_ring_vision_process(track_ring_vision_state_t *state, const uint8_t *binary,
                                uint16_t rows, uint16_t cols, track_vision_result_t *out);
