@@ -5,6 +5,9 @@
 // C13 控制启停；C14 开启时需赛道有效，关闭时只保留人工停机和 PWM 硬限幅。
 #define CAMERA_SEND_RAW 1
 #define CAMERA_TUNING_EXPOSURE 1024U
+// Auto black-level calibration uses dark reference pixels; exposure stays manual.
+// 0 keeps the driver default manual black-level calibration.
+#define CAMERA_TUNING_AUTO_BLACK_LEVEL 1U
 #define TRACK_DISPLAY_WIDTH 125U
 #define TRACK_DISPLAY_HEIGHT 100U
 #define IMU_AXIS_TEST_MODE 0
@@ -186,7 +189,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.4.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u\r\n",
+        "#CAM FW=0.4.1-camera T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -489,6 +492,9 @@ int main(void)
     tft180_full(RGB565_WHITE);
     interrupt_global_enable(0);
     camera_exposure_status = mt9v03x_set_exposure_time(CAMERA_TUNING_EXPOSURE);
+#if CAMERA_TUNING_AUTO_BLACK_LEVEL
+    (void)mt9v03x_set_reg(0x47U, 0x0080U);
+#endif
     uint8_t displayed_motor_state = motor_enabled;
     uint8_t displayed_protection_state = protection_enabled;
     uint8_t displayed_speed_mode = speed_full_enabled;
