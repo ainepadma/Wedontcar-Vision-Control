@@ -10,6 +10,7 @@ $compilerCommand=Get-Command $Compiler -ErrorAction Stop
     (Join-Path $PSScriptRoot 'test_ground_preprocess.c') `
     (Join-Path $projectRoot 'demo\user\src\img_process.c') `
     (Join-Path $projectRoot 'demo\user\src\track_vision.c') `
+    (Join-Path $projectRoot 'demo\user\src\ring_corner.c') `
     '-lm' '-o' $executable
 if($LASTEXITCODE -ne 0) { throw 'Ground preprocessing test compilation failed.' }
 & $executable @Frames

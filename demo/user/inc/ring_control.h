@@ -3,12 +3,12 @@
 #include <stdint.h>
 #include "track_vision.h"
 
-/* Ring-private image geometry. Ordinary TRACK_VISION_ROI_* stays unchanged. */
-#define RING_SEARCH_START_PERCENT 30U
-#define RING_SEARCH_END_PERCENT 68U
-#define RING_NEAR_START_PERCENT 55U
-#define RING_GUIDE_FAR_PERCENT 40U
-#define RING_GUIDE_NEAR_PERCENT 68U
+/* Shared coordinates inside the sensor-cropped window. */
+#define RING_SEARCH_START_PERCENT VISION_SEARCH_START_PERCENT
+#define RING_SEARCH_END_PERCENT VISION_SEARCH_END_PERCENT
+#define RING_NEAR_START_PERCENT VISION_NEAR_START_PERCENT
+#define RING_GUIDE_FAR_PERCENT VISION_TRACK_START_PERCENT
+#define RING_GUIDE_NEAR_PERCENT VISION_SEARCH_END_PERCENT
 #define RING_OPEN_WIDTH_RATIO 1.40f
 #define RING_OPEN_SIDE_RATIO 0.30f
 #define RING_WHITE_BAND_PERCENT 70U
@@ -33,12 +33,18 @@
 #define RING_LINE_MAX_COUNTS 12000.0f
 #define RING_YAW_START_DPS 12.0f
 
-/* 360 uses native raw boundaries and the unchanged native binary image.
- * Legacy row/count/pixel constants are reference calibration units only;
- * converted to native rows and learned per-row widths at their point of use.
- * No image resize, copied 80x60 image, extra pixel filter or binarization. */
-#define RING_360_VIEW_START_PERCENT 30U
-#define RING_360_VIEW_END_PERCENT 68U
+/* Reject junction widening before it can bias the ordinary midpoint/model. */
+#define RING_APPROACH_WIDTH_RATIO 1.18f
+#define RING_APPROACH_SIDE_RATIO 0.68f
+#define RING_APPROACH_LEARN_FRAMES 3U
+#define RING_APPROACH_MODEL_MAX_AGE 60U
+
+/* Historical ZORE constants kept for old fixtures/source comparison only.
+ * v0.6 corner geometry does NOT use the ZORE/lookahead/gain/speed constants.
+ * RING_360_YAW_STALE_MS below remains the active IMU freshness limit.
+ * Current corner thresholds live in ring_corner.h / ring_corner.c. */
+#define RING_360_VIEW_START_PERCENT VISION_SEARCH_START_PERCENT
+#define RING_360_VIEW_END_PERCENT VISION_SEARCH_END_PERCENT
 #define RING_360_IGNORE_TOP 10
 #define RING_360_STEER_CENTER_PERCENT 50.0f
 #define RING_360_SAFE_WIDTH 40
@@ -97,8 +103,7 @@
 #error "360 view must stay inside the existing raw-boundary ROI; do not change ordinary vision to expand it"
 #endif
 
-/* 270 exit only: reuse the unchanged 270 entrance evidence after entry_passed.
- * No extra turn/IMU/exit-score gate; hold body-forward until near road recovers. */
+/* Historical 270 exit tuning, inactive in the v0.6 corner event sequence. */
 #define RING_270_EXIT_CONFIRM_FRAMES 3U
 #define RING_270_EXIT_MIN_MS 300U
 #define RING_270_EXIT_RESTORE_FRAMES 4U
@@ -118,13 +123,18 @@
 #define RING_LINE_STEP_LIMIT 12.0f
 #define RING_STRAIGHT_SPEED_SCALE 1.0f
 
-/* Values 0..7 remain compatible with the existing TFT codes.
- * 2/8 = mouth ahead, normal/arc following; 3/5 = mouth reached, straight locked. */
+/* Legacy phase values retained for diagnostics; corner_stage is the current
+ * event stage. A phase alone does not imply that a virtual boundary is valid. */
 typedef enum {
     RING_STATE_IDLE=0, RING_STATE_CANDIDATE, RING_STATE_APPROACH,
     RING_STATE_ENTERING, RING_STATE_INSIDE, RING_STATE_EXITING,
     RING_STATE_COOLDOWN, RING_STATE_FAULT, RING_STATE_EXIT_APPROACH
 } ring_control_phase_t;
+
+typedef struct {
+    float x,y,travel,yaw;
+    uint8_t side,kind,missing,passed;
+} ring_corner_consumed_t;
 
 typedef struct {
     uint8_t phase, kind, type_vote, type_frames;
@@ -152,11 +162,27 @@ typedef struct {
     uint32_t cooldown_until_ms, line_started_ms, event_id;
     uint32_t last_yaw_ms;
     float yaw_progress_deg, yaw_rate_dps, travel_counts, line_started_counts;
+    /* v0.6: quantities/sequence own the transaction; no ZORE stage is executed.
+     * 360 stage: 1=A1, 2=B2 branch, 3=A3, 4=B4 main.
+     * 270 stage: 1=entry extend, 2=entry connect, 3=inside,
+     *            4=exit extend, 5=exit connect. */
+    uint8_t corner_stage,corner_guide_id,corner_counts[2];
+    uint8_t corner_guide_held,corner_have_guide,corner_have_consumed;
+    uint8_t corner_vote_guide,corner_vote_frames,corner_missing,corner_passed;
+    uint8_t corner_vote_misses;
+    uint32_t corner_vote_ms;
+    uint8_t corner_consumed_side,corner_consumed_kind;
+    uint32_t corner_frame_number,corner_guide_frame_number,corner_last_guide_ms;
+    float corner_x,corner_y,corner_vote_x,corner_vote_y;
+    float corner_event_travel,corner_event_yaw;
+    ring_corner_guide_t corner_selected_guide;
+    ring_corner_consumed_t corner_consumed[4]; /* Prevent A1/B2 being reused as A3/B4 while still visible. */
 } ring_control_state_t;
 
 void ring_control_init(ring_control_state_t *state);
 void ring_control_set_protection(ring_control_state_t *state,uint8_t enabled);
-/* 360 uses ZORE's visual states, not yaw integration. */
+/* Compatibility symbol only. v0.6 uses the ordinary bounded PD for both rings;
+ * this function intentionally leaves angle and speed unchanged. */
 void ring_control_360_motion(ring_control_state_t *state,float center,float left,float right,
                              float base_speed,float *angle,float *speed);
 void ring_control_tick(ring_control_state_t *state,uint8_t running,uint8_t yaw_fresh,

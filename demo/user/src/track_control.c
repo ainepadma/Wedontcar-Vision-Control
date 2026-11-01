@@ -8,8 +8,18 @@
 #define TRACK_LOST_STOP_FRAMES 3U
 #define TRACK_STALE_MS 150U
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
-/* 远处走向的前瞻权重：从 2.00 降低 20%，减轻提前入弯。 */
-#define TRACK_HEADING_WEIGHT 1.60
+/* 远处走向的前瞻权重：降低航向影响，几何识别范围保持不变。 */
+#define TRACK_HEADING_WEIGHT 1.00
+#define TRACK_APPROACH_HEADING_WEIGHT 0.25
+#define TRACK_NEAR_BEND_START 30.0
+#define TRACK_NEAR_BEND_FULL 120.0
+#define TRACK_BEND_P_BOOST 0.40
+#define TRACK_NEAR_HEADING_WEIGHT 0.80
+#define TRACK_BOTTOM_TRIGGER 80.0
+#define TRACK_BOTTOM_RELEASE 40.0
+#define TRACK_BOTTOM_PULSE_MS 160U
+#define TRACK_BOTTOM_MAX_DEG 2.0
+#define TRACK_BOTTOM_GAIN 0.01
 
 static double track_clamp(double value, double low, double high)
 {
@@ -63,6 +73,7 @@ void track_control_init(track_control_state_t *state,
     memset(state, 0, sizeof(*state));
     state->config = safe;
     state->loss_stop_enabled = 1U;
+    state->bottom_armed = 1U;
     state->servo_angle = safe.servo_center;
     state->stop_reason = TRACK_STOP_MANUAL;
 }
@@ -72,6 +83,8 @@ void track_control_stop(track_control_state_t *state, uint8_t reason)
     if (state == NULL)
         return;
     state->running = 0U;
+    state->bottom_active = state->bottom_votes = state->bottom_center_votes = 0U;
+    state->bottom_armed = 1U;
     state->stop_reason = reason >= TRACK_STOP_MANUAL && reason <= TRACK_STOP_OVERSPEED
                              ? reason : TRACK_STOP_MANUAL;
     state->derivative = 0.0f;
@@ -112,6 +125,7 @@ void track_control_observe(track_control_state_t *state, int16_t error,
         state->derivative = 0.0f;
         state->derivative_ready = 0U;
     }
+    state->near_geometry_valid = 0U;
     previous_valid = state->frame_valid;
     state->has_frame = 1U;
     state->last_frame_ms = now_ms;
@@ -150,6 +164,62 @@ void track_control_observe(track_control_state_t *state, int16_t error,
     else
         state->derivative = 0.0f;
     state->derivative_ready = state->running;
+}
+
+void track_control_observe_near(track_control_state_t *state, int16_t error,
+    int16_t heading, int16_t near_error, int16_t near_heading, uint8_t near_valid,
+    uint8_t confidence, uint8_t valid, uint32_t now_ms)
+{
+    if (state == NULL) return;
+    uint32_t elapsed = state->has_frame ? now_ms - state->last_frame_ms : 0U;
+    if (valid && confidence >= TRACK_MIN_CONFIDENCE && state->has_frame &&
+        (elapsed == 0U || elapsed > TRACK_MAX_FORWARD_TIME)) return;
+    uint8_t was_near = state->near_geometry_valid && state->frame_valid &&
+                       elapsed <= TRACK_STALE_MS;
+    double old_near = state->filtered_near_heading;
+    /* Changing paths resets D: global and near lateral errors differ. */
+    if (state->near_geometry_valid != (near_valid != 0U)) {
+        state->frame_valid = 0U; state->derivative_ready = 0U;
+    }
+    track_control_observe(state, near_valid ? near_error : error, heading,
+                          confidence, valid, now_ms);
+    state->near_geometry_valid = (uint8_t)(near_valid && state->frame_valid);
+    if (state->near_geometry_valid) {
+        double alpha = was_near ? (double)elapsed / (40.0 + elapsed) : 1.0;
+        state->filtered_near_heading = (float)(old_near + alpha *
+            (track_clamp(near_heading, -1000.0, 1000.0) - old_near));
+    } else state->filtered_near_heading = 0.0f;
+}
+
+void track_control_observe_bottom(track_control_state_t *state, int16_t error,
+                                  uint8_t valid, uint32_t now_ms)
+{
+    if (state == NULL || !state->has_frame || state->last_frame_ms != now_ms) return;
+    if (state->bottom_seen && state->bottom_frame_ms == now_ms) return;
+    state->bottom_seen = 1U; state->bottom_frame_ms = now_ms;
+    if (!state->running || !state->frame_valid || !valid) {
+        state->bottom_active = state->bottom_votes = state->bottom_center_votes = 0U;
+        return;
+    }
+    double e = track_clamp(error, -1000.0, 1000.0);
+    int8_t sign = e > 0.0 ? 1 : -1;
+    if (fabs(e) <= TRACK_BOTTOM_RELEASE) {
+        state->bottom_active = state->bottom_votes = 0U;
+        if (state->bottom_center_votes < 2U) ++state->bottom_center_votes;
+        if (state->bottom_center_votes >= 2U) state->bottom_armed = 1U;
+        return;
+    }
+    state->bottom_center_votes = 0U;
+    if (state->bottom_active && sign != state->bottom_sign) state->bottom_active = 0U;
+    if (fabs(e) < TRACK_BOTTOM_TRIGGER) {state->bottom_votes = 0U;return;}
+    if (!state->bottom_armed) return;
+    if (sign != state->bottom_sign) state->bottom_votes = 0U;
+    state->bottom_sign = sign;
+    if (++state->bottom_votes < 2U) return;
+    state->bottom_votes = 0U; state->bottom_armed = 0U; state->bottom_active = 1U;
+    state->bottom_start_ms = now_ms;
+    state->bottom_pulse_deg = (float)(sign * fmin(TRACK_BOTTOM_MAX_DEG,
+                                                TRACK_BOTTOM_GAIN * fabs(e)));
 }
 
 void track_control_toggle(track_control_state_t *state, uint32_t now_ms)
@@ -216,19 +286,38 @@ track_control_output_t track_control_tick(track_control_state_t *state,
         state->derivative = 0.0f;
         state->derivative_ready = 0U;
     }
+    if (!state->frame_valid || !state->running ||
+        (uint32_t)(now_ms - state->bottom_start_ms) >= TRACK_BOTTOM_PULSE_MS)
+        state->bottom_active = 0U;
     if (state->running)
     {
         const track_control_config_t *cfg = &state->config;
         if (state->frame_valid)
         {
-            /* Curve-centre placement can produce a small cross-track error with a
-             * large look-ahead heading. Let heading dominate in that case so the
-             * car turns into the bend instead of continuing almost straight. */
+            double heading_weight = TRACK_HEADING_WEIGHT;
+            double boost = 1.0, local_heading = 0.0;
+            if (state->near_geometry_valid) {
+                local_heading = state->filtered_near_heading;
+                double bend = track_clamp((fabs(local_heading) - TRACK_NEAR_BEND_START) /
+                    (TRACK_NEAR_BEND_FULL - TRACK_NEAR_BEND_START), 0.0, 1.0);
+                /* A reversing/S-bend far tangent must not boost opposite steering. */
+                double aligned = local_heading * state->filtered_heading >= 0.0 ? bend : 0.0;
+                heading_weight = TRACK_APPROACH_HEADING_WEIGHT + aligned *
+                    (TRACK_HEADING_WEIGHT - TRACK_APPROACH_HEADING_WEIGHT);
+                boost += TRACK_BEND_P_BOOST * bend;
+            }
             double mixed_error = track_clamp((double)state->filtered_error +
-                                            TRACK_HEADING_WEIGHT * state->filtered_heading,
-                                            -1000.0, 1000.0);
-            double correction = (double)cfg->kp * mixed_error +
+                heading_weight * state->filtered_heading +
+                TRACK_NEAR_HEADING_WEIGHT * local_heading, -1000.0, 1000.0);
+            /* Never amplify a command pointing away from the measured near bend. */
+            if (local_heading * mixed_error <= 0.0) boost = 1.0;
+            double correction = (double)cfg->kp * boost * mixed_error +
                                 (double)cfg->kd * state->derivative;
+            if (state->bottom_active) {
+                double fade = 1.0 - (double)(uint32_t)(now_ms - state->bottom_start_ms) /
+                                    TRACK_BOTTOM_PULSE_MS;
+                correction += state->bottom_pulse_deg * fade;
+            }
             double endpoint = correction >= 0.0 ? cfg->servo_right : cfg->servo_left;
             double span = fabs(endpoint - cfg->servo_center);
             double offset = fmin(fabs(correction), span);

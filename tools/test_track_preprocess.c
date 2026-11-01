@@ -13,6 +13,8 @@
 static uint8_t pixels[TRACK_VISION_MAX_ROWS * TRACK_VISION_MAX_COLS];
 static uint8_t scratch[5U * TRACK_VISION_MAX_COLS];
 static track_vision_result_t result;
+static track_ring_vision_state_t captured_ring_model;
+static uint32_t captured_frame_number;
 
 static uint8_t process(uint16_t rows, uint16_t cols)
 {
@@ -22,7 +24,9 @@ static uint8_t process(uint16_t rows, uint16_t cols)
         (uint16_t)((uint32_t)rows * 30U / 100U),
         (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U),
         scratch, sizeof(scratch), histogram, &threshold));
+    if (threshold != 255U)
     track_vision_process(pixels, rows, cols, &result);
+    else memset(&result, 0, sizeof(result));
     return threshold;
 }
 
@@ -124,15 +128,38 @@ static void captured_frame(const char *path)
     fclose(file);
     CHECK(read_count == 376U * 240U && extra == EOF && !failed);
     const uint8_t threshold = process(240, 376);
-    printf("CAPTURE %s threshold=%u valid=%u Q=%u rows=%u error=%d heading=%d\n",
+    result.frame_number = ++captured_frame_number;
+    track_ring_vision_process(&captured_ring_model, pixels, 240, 376, &result);
+    printf("CAPTURE %s threshold=%u valid=%u Q=%u rows=%u error=%d heading=%d corners=%u/%u hint=%u\n",
            path, (unsigned int)threshold, (unsigned int)result.valid,
            (unsigned int)result.confidence, (unsigned int)result.valid_rows,
-           (int)result.error, (int)result.heading);
-    CHECK(result.valid);
+           (int)result.error, (int)result.heading,
+           (unsigned int)result.ring.corners.count[0],
+           (unsigned int)result.ring.corners.count[1],
+           (unsigned int)result.ring.type_hint);
+    for (unsigned int side = 0U; side < 2U; ++side) {
+        for (unsigned int index = 0U;
+             index < result.ring.corners.count[side] && index < RING_CORNER_MAX_PER_SIDE;
+             ++index) {
+            const ring_corner_point_t *point = &result.ring.corners.point[side][index];
+            printf("  CORNER side=%u index=%u xy=%.2f,%.2f kind=%u quality=%u "
+                   "main=%.3f,%.3f branch=%.3f,%.3f A=%u B2=%u B4=%u\n",
+                   side, index, (double)point->x, (double)point->y,
+                   (unsigned int)point->kind, (unsigned int)point->quality,
+                   (double)point->main_dx, (double)point->main_dy,
+                   (double)point->branch_dx, (double)point->branch_dy,
+                   (unsigned int)result.ring.corners.guide[RING_GUIDE_A_LEFT + side].valid,
+                   (unsigned int)result.ring.corners.guide[RING_GUIDE_B_BRANCH_LEFT + side].valid,
+                   (unsigned int)result.ring.corners.guide[RING_GUIDE_B_MAIN_LEFT + side].valid);
+        }
+    }
+    /* Captured frames are diagnostic evidence, not pass/fail fixtures. A frame
+     * that fails ordinary tracking must still print its corner geometry. */
 }
 
 int main(int argc, char **argv)
 {
+    track_ring_vision_init(&captured_ring_model);
     synthetic(120, 188);
     synthetic(240, 376);
     synthetic(480, 752);

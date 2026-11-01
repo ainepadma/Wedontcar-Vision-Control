@@ -70,6 +70,10 @@ static uint32_t consumed_frame_generation;
 static volatile struct
 {
     int16_t error, heading;
+    int16_t near_error, near_heading;
+    uint8_t near_geometry_valid;
+    int16_t bottom_error;
+    uint8_t bottom_valid;
     uint8_t confidence, valid, ring_candidate;
     int8_t ring_direction;
     track_ring_observation_t ring;
@@ -111,10 +115,15 @@ void track_runtime_init(void)
 
 void track_frame_publish(const track_vision_result_t *result)
 {
-    // 临界区只复制几个标量，不包含整帧复制/图像计算或 SPI/串口操作。
+    // 临界区复制结构化观测和候选路径；不复制像素、不计算几何或执行IO。
     uint32_t primask = interrupt_global_disable();
     track_mailbox.error = result->error;
     track_mailbox.heading = result->heading;
+    track_mailbox.near_error = result->near_error;
+    track_mailbox.near_heading = result->near_heading;
+    track_mailbox.near_geometry_valid = result->near_geometry_valid;
+    track_mailbox.bottom_error = result->bottom_error;
+    track_mailbox.bottom_valid = result->bottom_valid;
     track_mailbox.confidence = result->confidence;
     track_mailbox.valid = result->valid;
     track_mailbox.ring_candidate = result->ring_candidate;
@@ -263,7 +272,10 @@ void PIT_IRQHandler(void)
         if (fresh_ring_frame || ring_control.control_refresh)
         {
             consumed_frame_generation = track_mailbox.generation;
-            const track_ring_observation_t vision = track_mailbox.ring;
+            /* PIT exclusively owns this scratch. Keep the 2.5KB observation
+             * off the shared 8KB main/IRQ stack; mailbox publication is atomic. */
+            static track_ring_observation_t vision;
+            vision = track_mailbox.ring;
 #if !SERVO_CENTER_TEST_MODE
             if (fresh_ring_frame)
                 ring_control_observe(&ring_control, &vision, track_mailbox.observed_ms,
@@ -284,9 +296,16 @@ void PIT_IRQHandler(void)
                 track_control.derivative_ready = 0U;
                 ring_control.reset_tracking_history = 0U;
             }
-            track_control_observe(&track_control, path.error, path.heading,
+            track_control_observe_near(&track_control, path.error, path.heading,
+                                  track_mailbox.near_error, track_mailbox.near_heading,
+                                  (uint8_t)(track_mailbox.near_geometry_valid &&
+                                    ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
                                   path.confidence, path.valid,
                                   fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
+            track_control_observe_bottom(&track_control, track_mailbox.bottom_error,
+                (uint8_t)(fresh_ring_frame && track_mailbox.bottom_valid &&
+                          ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
+                fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
         }
         if (protection_enabled && ring_control.fault)
             track_control_stop(&track_control, TRACK_STOP_RING);
@@ -294,13 +313,8 @@ void PIT_IRQHandler(void)
         if (ring_control_guidance_active(&ring_control) &&
             output.target_speed > TRACK_SPEED_CURVE_MIN)
             output.target_speed = TRACK_SPEED_CURVE_MIN;
-        if (output.running && ring_control.action_locked && ring_control.kind == TRACK_RING_360 && !ring_control.fault)
-        {
-            ring_control_360_motion(&ring_control, SERVO_MOTOR_CENTER,
-                track_control.config.servo_left, track_control.config.servo_right,
-                track_control.config.speed_straight, &output.servo_angle, &output.target_speed);
-            track_control.servo_angle = output.servo_angle;
-        }
+        // v0.6: corner-repaired paths use the same PD, calibration and slew
+        // limits as ordinary following. No legacy 360 output may overwrite it.
         if (ring_control.line_active)
             output.target_speed *= constrain_float(RING_STRAIGHT_SPEED_SCALE, 0.1f, 1.0f);
         motor_enabled = output.running;

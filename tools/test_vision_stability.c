@@ -18,7 +18,9 @@ static void process(image_track_preprocess_state_t *state,uint32_t now)
 {
     uint8_t threshold;
     CHECK(image_track_preprocess_stable(pixels,240,376,72,163,scratch,sizeof(scratch),histogram,&threshold,state,now));
+    if (threshold != 255U)
     track_vision_process(pixels,240,376,&result);
+    else memset(&result, 0, sizeof(result));
 }
 static void temporal(void)
 {

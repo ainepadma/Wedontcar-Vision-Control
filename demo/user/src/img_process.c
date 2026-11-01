@@ -371,7 +371,15 @@ uint8_t image_track_preprocess_stable(uint8_t *image, uint16_t rows, uint16_t co
         gap * 100U >= model.high_q8 * 8U && gap * 256U / gain >= 64U);
     if (!credible && !brief_weak)
     {
-        memset(image, 0, size); *threshold = 255U;
+        /* Keep a current-frame binary preview even when contrast is unreliable.
+         * 255 remains the invalid-observation sentinel for control consumers. */
+        uint32_t preview_cut = !reset ?
+            (uint32_t)state->threshold_raw_q8 * gain / 65536U :
+            (model.valid ? model.cut_q8 / 256U : 128U);
+        if (preview_cut > 254U) preview_cut = 254U;
+        for (uint32_t i = 0U; i < size; ++i)
+            image[i] = image[i] > preview_cut ? 255U : 0U;
+        *threshold = 255U;
         if (state != NULL) memset(state, 0, sizeof(*state));
         return 1U;
     }
