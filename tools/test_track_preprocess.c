@@ -24,7 +24,9 @@ static uint8_t process(uint16_t rows, uint16_t cols)
         (uint16_t)((uint32_t)rows * 30U / 100U),
         (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U),
         scratch, sizeof(scratch), histogram, &threshold));
+    if (threshold != 255U)
     track_vision_process(pixels, rows, cols, &result);
+    else memset(&result, 0, sizeof(result));
     return threshold;
 }
 

@@ -11,6 +11,7 @@
 #define RING_CORNER_MIN_TRAVEL 20.0f
 #define RING_CORNER_HOLD_MS 120U
 #define RING_CORNER_MIN_QUALITY 55U
+#define RING_CORNER_REACQUIRE_FRAMES 2U
 
 typedef enum { RING_CORNER_NONE=0, RING_CORNER_A, RING_CORNER_B } ring_corner_class_t;
 typedef enum {
@@ -45,7 +46,7 @@ typedef struct {
 typedef struct {
     uint32_t frame_number;
     uint16_t rows,cols,detector_near_row; /* Last vertex row supported by every sampling radius. */
-    uint8_t count[2],road_clear;
+    uint8_t count[2],road_clear,continued_mask; /* bit side: locally reacquired A; never an event vote. */
     ring_corner_point_t point[2][RING_CORNER_MAX_PER_SIDE]; /* Near to far. */
     ring_corner_guide_t guide[RING_CORNER_GUIDE_COUNT];
 } ring_corner_frame_t;
@@ -57,9 +58,19 @@ typedef struct {
     uint8_t model_ready;
 } ring_corner_context_t;
 
+typedef struct {
+    ring_corner_point_t point[2];
+    uint16_t rows,cols;
+    uint8_t valid[2],misses[2];
+} ring_corner_tracker_t;
+
 /* Pure bounded per-frame geometry; must never alter binary or carry motion state.
  * The ISR chooses among precomputed guide candidates, including on a transition
  * frame. No state-dependent old-frame line can be selected accidentally. */
 void ring_corner_process(const uint8_t *binary,uint16_t rows,uint16_t cols,
                          const ring_corner_context_t *context,ring_corner_frame_t *out);
+/* Once per processed image, after raw detection. Counts remain raw; recovered
+ * guides are recomputed from CURRENT pixels, and expire after two misses. */
+void ring_corner_stabilize(const uint8_t *binary,const ring_corner_context_t *context,
+                          ring_corner_tracker_t *tracker,ring_corner_frame_t *out);
 #endif

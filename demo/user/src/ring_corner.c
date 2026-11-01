@@ -1,4 +1,5 @@
 #include "ring_corner.h"
+#include "vision_geometry.h"
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
@@ -9,10 +10,10 @@
  * image recovers both arms even when a row-run selector discarded a branch. */
 #define RC_MAX_ROWS 480U
 #define RC_MAX_COLS 752U
-#define RC_TOP_PERCENT 30U
-#define RC_END_PERCENT 68U
-#define RC_GUIDE_PERCENT 40U
-#define RC_NEAR_PERCENT 55U
+#define RC_TOP_PERCENT VISION_SEARCH_START_PERCENT
+#define RC_END_PERCENT VISION_SEARCH_END_PERCENT
+#define RC_GUIDE_PERCENT VISION_TRACK_START_PERCENT
+#define RC_NEAR_PERCENT VISION_NEAR_START_PERCENT
 #define RC_DIRECTIONS 32U
 #define RC_POOL 24U
 #define RC_VERTEX_BUDGET 4096U
@@ -89,7 +90,7 @@ static float rc_center(const ring_corner_context_t *ctx,unsigned cols,unsigned e
 }
 
 static uint8_t rc_vertex(const uint8_t *image,unsigned cols,float x,float y,float radius,
-                         ring_corner_point_t *point)
+                         ring_corner_point_t *point,uint8_t tracked)
 {
     rc_vec_t rays[3][2],arm[2],anchor[2];unsigned sizes[3];float residual=0.f;
     for(unsigned k=0U;k<3U;++k)
@@ -98,14 +99,14 @@ static uint8_t rc_vertex(const uint8_t *image,unsigned cols,float x,float y,floa
     for(unsigned k=1U;k<3U;++k) {if(sizes[k]>maximum) maximum=sizes[k];if(sizes[k]<minimum) minimum=sizes[k];}
     /* Smooth circular arcs change sector aperture with radius; a junction tip
      * retains two locally straight arms. Do not call every round island a tip. */
-    if(maximum-minimum>2U) return 0U;
+    if(maximum-minimum>(tracked ? 3U : 2U)) return 0U;
     for(unsigned side=0U;side<2U;++side) {
         rc_vec_t first={x+radius*rays[0][side].x,y+radius*rays[0][side].y};
         rc_vec_t middle={x+2.f*radius*rays[1][side].x,y+2.f*radius*rays[1][side].y};
         rc_vec_t last={x+3.f*radius*rays[2][side].x,y+3.f*radius*rays[2][side].y};
         arm[side]=rc_unit(rc_sub(last,first));anchor[side]=first;
         float error=fabsf(rc_cross(rc_sub(middle,first),arm[side]));
-        if(error>radius*.25f+.65f) return 0U;
+        if(error>radius*(tracked ? .35f : .25f)+.65f) return 0U;
         residual+=error;
     }
     float den=rc_cross(arm[0],arm[1]);
@@ -427,7 +428,7 @@ void ring_corner_process(const uint8_t *binary,uint16_t rows,uint16_t cols,
                 out->count[0]=RING_CORNER_MAX_PER_SIDE;out->count[1]=RING_CORNER_MAX_PER_SIDE;return;
             }
             ring_corner_point_t p;uint8_t side;
-            if(!rc_vertex(binary,cols,(float)col,(float)row,(float)radius,&p)) continue;
+            if(!rc_vertex(binary,cols,(float)col,(float)row,(float)radius,&p,0U)) continue;
             if(p.y<(float)(top+margin) || p.y>(float)(end-margin-1U) || p.x<(float)margin || p.x>(float)(cols-margin-1U)) continue;
             if(!rc_associated(binary,cols,end,context,&p,(float)radius,&side)) continue;
             rc_add(pool,&size,&p,side,(float)radius,&overflow);
@@ -452,4 +453,76 @@ void ring_corner_process(const uint8_t *binary,uint16_t rows,uint16_t cols,
         out->road_clear=(uint8_t)(paired*100U>=(end-top)*65U && near_paired*100U>=(end-near)*65U);
     }
     rc_270(binary,rows,cols,context,out);rc_360(binary,rows,cols,context,out);
+}
+
+void ring_corner_stabilize(const uint8_t *binary,const ring_corner_context_t *ctx,
+                          ring_corner_tracker_t *tracker,ring_corner_frame_t *out)
+{
+    if(tracker==NULL || out==NULL) return;
+    unsigned rows=out->rows,cols=out->cols;
+    out->continued_mask=0U;
+    if(binary==NULL || ctx==NULL || rows<60U || rows>RC_MAX_ROWS || cols<64U || cols>RC_MAX_COLS ||
+       !ctx->model_ready || !isfinite(ctx->width_near) || !isfinite(ctx->width_slope) ||
+       !isfinite(ctx->center_near) || !isfinite(ctx->center_slope) || ctx->width_near<1.f) {
+        memset(tracker,0,sizeof(*tracker));return;
+    }
+    if(tracker->rows!=rows || tracker->cols!=cols) {
+        memset(tracker,0,sizeof(*tracker));tracker->rows=(uint16_t)rows;tracker->cols=(uint16_t)cols;
+    }
+    /* Never turn bilateral/ambiguous quantity evidence into a single A. */
+    if((out->count[0] && out->count[1]) || out->count[0]>=RING_CORNER_MAX_PER_SIDE ||
+       out->count[1]>=RING_CORNER_MAX_PER_SIDE) {
+        memset(tracker->valid,0,sizeof(tracker->valid));return;
+    }
+    unsigned radius=rows/48U;if(radius<3U) radius=3U;
+    unsigned margin=radius*3U+2U,top=rows*RC_TOP_PERCENT/100U,end=rows*RC_END_PERCENT/100U;
+    for(unsigned side=0U;side<2U;++side) {
+        unsigned id=RING_GUIDE_A_LEFT+side;
+        if(out->count[1U-side]) {tracker->valid[side]=0U;continue;}
+        if(out->guide[id].valid) {
+            tracker->valid[side]=0U;
+            for(unsigned i=0U;i<out->count[side];++i) {
+                const ring_corner_point_t *p=&out->point[side][i];
+                if(p->kind==RING_CORNER_A && fabsf(p->x-out->guide[id].corner_x)<1.f &&
+                   fabsf(p->y-out->guide[id].corner_y)<1.f) {
+                    tracker->point[side]=*p;tracker->valid[side]=1U;tracker->misses[side]=0U;break;
+                }
+            }
+            continue;
+        }
+        if(!tracker->valid[side]) continue;
+        if(++tracker->misses[side]>RING_CORNER_REACQUIRE_FRAMES || out->count[side]>1U) {
+            tracker->valid[side]=0U;continue;
+        }
+        const ring_corner_point_t old=tracker->point[side];
+        if(out->count[side] && (out->point[side][0].kind==RING_CORNER_B ||
+           fabsf(out->point[side][0].x-old.x)>8.f || fabsf(out->point[side][0].y-old.y)>8.f)) {
+            tracker->valid[side]=0U;continue;
+        }
+        ring_corner_guide_t best={0};ring_corner_point_t best_point={0};float best_score=-1.e9f;
+        /* Small bounded search: the old location only seeds current geometry.
+         * Aperture/residual hysteresis is local; global discovery is unchanged. */
+        for(int dy=-4;dy<=4;dy+=2) for(int dx=-4;dx<=4;dx+=2) {
+            float x=old.x+(float)dx,y=old.y+(float)dy;
+            if(x<(float)margin || x>(float)(cols-margin-1U) ||
+               y<(float)(top+margin) || y>(float)(end-margin-1U)) continue;
+            ring_corner_point_t p;uint8_t found_side;
+            if(!rc_vertex(binary,cols,x,y,(float)radius,&p,1U) || p.kind!=RING_CORNER_A ||
+               fabsf(p.x-old.x)>8.f || fabsf(p.y-old.y)>8.f ||
+               p.main_dx*old.main_dx+p.main_dy*old.main_dy<.85f ||
+               p.branch_dx*old.branch_dx+p.branch_dy*old.branch_dy<.70f ||
+               !rc_associated(binary,cols,end,ctx,&p,(float)radius,&found_side) || found_side!=side) continue;
+            ring_corner_guide_t g={0};
+            g.boundary[side]=rc_ray(p.x,p.y,-p.main_dx,-p.main_dy,top,end,cols);
+            g.corner_side=(uint8_t)side;g.corner_kind=p.kind;g.corner_x=p.x;g.corner_y=p.y;
+            (void)rc_finish(binary,rows,cols,ctx,&g);
+            if(!g.valid || g.confidence<70U) continue;
+            float score=(float)p.quality-fabsf(p.x-old.x)-fabsf(p.y-old.y);
+            if(score>best_score) {best=g;best_point=p;best_score=score;}
+        }
+        if(best.valid) {
+            out->guide[id]=best;tracker->point[side]=best_point;
+            out->continued_mask|=(uint8_t)(1U<<side);out->road_clear=0U;
+        }
+    }
 }

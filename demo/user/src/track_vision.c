@@ -334,22 +334,10 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
 
 void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols)
 {
-    if (binary == NULL || rows < 10U || rows > TRACK_VISION_MAX_ROWS ||
-        cols < 16U || cols > TRACK_VISION_MAX_COLS || route_seed_ambiguous)
-        return;
-    const uint16_t first = (uint16_t)((uint32_t)rows * 30U / 100U);
-    const uint16_t end = (uint16_t)((uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U);
-    uint8_t have_road = 0U;
-    for (uint16_t y = first; y < end && !have_road; ++y)
-        for (uint16_t x = 0U; x < cols; ++x)
-            if (route_member(y, x)) { have_road = 1U; break; }
-    if (!have_road) return;
-
-    /* 上方保留二值图；中间只显示近处赛道所属的白色连通区域。
-     * 下方车体区域保持原样，便于核对相机安装和遮挡位置。 */
-    for (uint16_t y = first; y < end; ++y)
-        for (uint16_t x = 0U; x < cols; ++x)
-            if (!route_member(y, x)) binary[(uint32_t)y * cols + x] = 0U;
+    /* Compatibility entry point: preview masking has been removed. */
+    (void)binary;
+    (void)rows;
+    (void)cols;
 }
 
 
@@ -410,6 +398,91 @@ static void ring_path_finish(track_vision_result_t *out,unsigned mode,unsigned s
     p->error=track_clamp_error(((int64_t)2*sum-(int64_t)(cols-1U)*ws)*1000/((int64_t)(cols-1U)*ws));
     p->heading=track_clamp_error(((int64_t)fs*nc-(int64_t)ns*fc)*2000/((int64_t)nc*fc*(cols-1U)));
 }
+
+/* Use the PREVIOUS normal-road model. A gradually widening mouth must not
+ * first move the reference and then be judged against its own biased fit. */
+static uint8_t ring_approach_opening(const track_ring_vision_state_t *s,const uint8_t *image,
+                                    unsigned start,unsigned end)
+{
+    if(!s->ready) return 0U;
+    unsigned run[2]={0U,0U},best[2]={0U,0U};
+    for(unsigned y=start;y<end;++y) {
+        uint16_t l=0U,r=0U;float w=ring_width(s,y,end-1U);
+        float c=s->center_near+s->center_slope*((float)y-(float)(end-1U));
+        uint8_t found=ring_run(image+y*s->cols,s->cols,c,y,&l,&r);
+        uint8_t wide=(uint8_t)(found && (float)(r-l)>w*RING_APPROACH_WIDTH_RATIO &&
+                               (float)(r-l)-w>(float)s->cols*.025f);
+        uint8_t open[2]={(uint8_t)(wide && (float)l<c-w*RING_APPROACH_SIDE_RATIO),
+                         (uint8_t)(wide && (float)r>c+w*RING_APPROACH_SIDE_RATIO)};
+        for(unsigned side=0U;side<2U;++side) {
+            run[side]=open[side] ? run[side]+1U : 0U;
+            if(run[side]>best[side]) best[side]=run[side];
+        }
+    }
+    return (uint8_t)((best[0]>=3U ? 1U : 0U)|(best[1]>=3U ? 2U : 0U));
+}
+
+static void ring_approach_path(const track_ring_vision_state_t *history,const uint8_t *image,
+                               track_vision_result_t *out,unsigned start,unsigned end,uint8_t opening)
+{
+    track_ring_observation_t *v=&out->ring;
+    if(!history->ready || history->learned_frames<RING_APPROACH_LEARN_FRAMES) {
+        v->approach_reject=TRACK_APPROACH_NO_MODEL;return;
+    }
+    if(history->age_frames>=RING_APPROACH_MODEL_MAX_AGE) {
+        v->approach_reject=TRACK_APPROACH_STALE;return;
+    }
+    if(!opening) {v->approach_reject=TRACK_APPROACH_NO_OPEN;return;}
+    if(opening==3U || (v->left_open && v->right_open)) {
+        v->approach_reject=TRACK_APPROACH_BOTH_OPEN;return;
+    }
+    unsigned side=opening==1U ? 1U : 0U,mask=1U<<side,cols=history->cols;
+    unsigned span=end-start,zone=span/3U,count=0U,nc=0U,fc=0U,paired=0U;
+    unsigned gap=0U,max_gap=0U,changed=0U;
+    float sum=0.f,weights=0.f,ns=0.f,fs=0.f,previous=0.f;
+    for(unsigned next=end;next>start;--next) {
+        unsigned y=next-1U;float width=ring_width(history,y,end-1U);
+        if(!(out->raw_flags[y]&mask)) {if(++gap>max_gap) max_gap=gap;continue;}
+        float edge=(float)(side ? out->raw_right[y] : out->raw_left[y]);
+        float c=edge+(side ? -.5f : .5f)*width;
+        float predicted=history->center_near+history->center_slope*((float)y-(float)(end-1U));
+        /* Preserve a genuinely observed edge, including gentle curvature. A
+         * displaced/fragmented opposite branch is not a replacement boundary. */
+        if(fabsf(c-predicted)>width*.20f || (count && fabsf(c-previous)>(float)cols*.015f*(float)(gap+1U)+1.f)) {
+            v->approach_reject=TRACK_APPROACH_EDGE;return;
+        }
+        unsigned raw_width=out->raw_right[y]-out->raw_left[y];
+        uint8_t expanded=(uint8_t)((float)raw_width>width*1.08f || (out->raw_flags[y]&12U));
+        if(!expanded && out->row_valid[y]) c=(float)out->center[y];
+        else ++changed;
+        int x=(int)lroundf(c),margin=(int)(width*.18f);
+        if(x-margin<0 || x+margin>=(int)cols) {v->approach_reject=TRACK_APPROACH_SUPPORT;return;}
+        unsigned black=0U;uint8_t supported=1U;
+        for(int px=x-margin;px<=x+margin;++px) {
+            if(!image[y*cols+(unsigned)px]) {if(++black>2U) {supported=0U;break;}}
+            else black=0U;
+        }
+        if(!supported) {v->approach_reject=TRACK_APPROACH_SUPPORT;return;}
+        previous=c;gap=0U;
+        out->approach_center[y]=(uint16_t)x;out->approach_valid[y]=1U;
+        float weight=y>=end-zone ? 3.f : (y<start+zone ? 1.f : 2.f);
+        sum+=weight*c;weights+=weight;++count;
+        if(y>=end-zone) {
+            ns+=c;++nc;
+            if((out->raw_flags[y]&3U)==3U && (float)raw_width>=width*.85f && (float)raw_width<=width*1.15f) ++paired;
+        }
+        if(y<start+zone) {fs+=c;++fc;}
+    }
+    if(count*100U<span*85U || nc*100U<zone*80U || fc*100U<zone*80U ||
+       paired*100U<zone*60U || max_gap>2U || changed<3U || weights<1.f) {
+        v->approach_reject=TRACK_APPROACH_EDGE;return;
+    }
+    v->approach_path=(track_path_observation_t){
+        track_clamp_error((int64_t)lroundf((sum/weights*2.f/(float)(cols-1U)-1.f)*1000.f)),
+        track_clamp_error((int64_t)lroundf((fs/(float)fc-ns/(float)nc)*2000.f/(float)(cols-1U))),
+        1U,(uint8_t)(count*100U/span)};
+    v->approach_source=(uint8_t)(side==0U ? TRACK_PATH_LEFT : TRACK_PATH_RIGHT);
+}
 /* ZORE T -> W -> T topology, with lengths normalized to this private ROI.
  * One isolated lost row does not become the missing middle segment. */
 static uint8_t ring_topology(const track_vision_result_t *out,unsigned start,unsigned end,unsigned side,unsigned minimum)
@@ -438,7 +511,7 @@ static void ring_island(const uint8_t *image,unsigned rows,unsigned cols,track_r
 {
     unsigned run[2]={0U,0U},best[2]={0U,0U};int previous[2]={-10000,-10000};
     unsigned flank=cols/16U,minimum=cols*RING_ISLAND_MIN_WIDTH_PERCENT/100U;
-    for(unsigned y=rows*RING_SEARCH_START_PERCENT/100U;y<rows*55U/100U;++y) {
+    for(unsigned y=rows*RING_SEARCH_START_PERCENT/100U;y<rows*RING_NEAR_START_PERCENT/100U;++y) {
         const uint8_t *pix=image+y*cols;int found[2]={-10000,-10000};
         for(unsigned x=flank;x+flank<cols;) {
             if(pix[x]!=0U) {++x;continue;}
@@ -500,6 +573,7 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     if(s==NULL || out==NULL) return;
     memset(&out->ring,0,sizeof(out->ring));memset(out->raw_flags,0,sizeof(out->raw_flags));
     memset(out->guide_valid,0,sizeof(out->guide_valid));
+    memset(out->approach_valid,0,sizeof(out->approach_valid));
     out->ring.path[0]=(track_path_observation_t){out->error,out->heading,out->valid,out->confidence};
     if (!RING_FEATURE_ENABLED) {
         out->ring_candidate=0U;out->ring_direction=0;
@@ -520,6 +594,8 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
         s->width_near=(float)cols*0.28f;
         s->width_slope=(float)cols*0.12f/(float)(end-guide);
     }
+    const track_ring_vision_state_t history=*s;
+    uint8_t approach_open=ring_approach_opening(&history,binary,guide,end);
     float sy=0.f,syy=0.f,sw=0.f,syw=0.f,sc=0.f,syc=0.f,count=0.f;
     for(unsigned y=close;y<end;++y) {
         uint16_t l=0U,r=0U;float expected=incoming+slope*((float)y-(float)near);
@@ -535,12 +611,18 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
         float fit_cs=(count*syc-sy*sc)/den,fit_cn=(sc-fit_cs*sy)/count;
         if(fit_ws>=-0.05f && fit_ws<(float)cols/(float)rows*2.f && fit_wn>(float)cols/12.f &&
            fabsf(fit_cs)<(float)cols/(float)rows*1.5f) {
-            wn=fit_wn;ws=fmaxf(0.f,fit_ws);incoming=fit_cn;slope=fit_cs;fresh=1U;
-            if(!s->ready) {s->width_near=wn;s->width_slope=ws;s->ready=1U;}
+            wn=fit_wn;ws=fmaxf(0.f,fit_ws);fresh=1U;
+            if(!approach_open) {incoming=fit_cn;slope=fit_cs;}
+            if(!s->ready) {
+                /* Geometry may initialize at a junction, but it is NOT learned
+                 * road evidence until later clear frames. Keep its pose usable
+                 * so returning to a normal road can acquire that evidence. */
+                s->width_near=wn;s->width_slope=ws;
+                s->center_near=fit_cn;s->center_slope=fit_cs;s->ready=1U;
+            }
         }
     }
-    if(fresh) {s->center_near=incoming;s->center_slope=slope;s->age_frames=0U;}
-    else if(s->age_frames<UINT8_MAX) ++s->age_frames;
+    if(s->age_frames<UINT8_MAX) ++s->age_frames;
     out->ring.model_ready=s->ready;
     out->ring.near_center=incoming*2000.f/(float)(cols-1U)-1000.f;
     ring_island(binary,rows,cols,&out->ring);
@@ -604,11 +686,12 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     uint8_t structured=(uint8_t)(upper_white>cols/4U && upper_black>cols/4U);
     out->ring.wide_white=(uint8_t)(out->ring.white_band && structured);
     const ring_corner_context_t corner_context={out->raw_left,out->raw_right,out->raw_flags,
-        s->width_near,s->width_slope,s->center_near,s->center_slope,s->ready};
+        s->width_near,s->width_slope,incoming,slope,s->ready};
     ring_corner_process(binary,rows,cols,&corner_context,&out->ring.corners);
+    ring_corner_stabilize(binary,&corner_context,&s->corner_tracker,&out->ring.corners);
     out->ring.corners.frame_number=out->frame_number;
     unsigned left_corners=out->ring.corners.count[0],right_corners=out->ring.corners.count[1];
-    if(left_corners || right_corners) out->ring.junction=1U;
+    if(left_corners || right_corners || out->ring.corners.continued_mask) out->ring.junction=1U;
     /* Counts and paired topology select the element. Never classify by 90deg. */
     if(left_corners==right_corners && left_corners>0U && left_corners<=2U) {
         out->ring.type_hint=TRACK_RING_270;out->ring.entry_score=80U;
@@ -633,7 +716,13 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
         if(out->ring.path[mode].valid && abs(out->ring.path[mode].heading)>=RING_VISUAL_TURN_MIN)
             out->ring.turn_hint=out->ring.path[mode].heading<0 ? 1 : -1;
     }
-    if(out->ring.road_clear && abs(out->heading)<120 && fresh) {
+    ring_approach_path(&history,binary,out,guide,end,approach_open);
+    if(out->ring.road_clear && !approach_open && fresh) {
+        /* A normal bend still updates pose. Only width calibration requires
+         * a straight road; freezing pose on every bend would lose association. */
+        s->center_near=incoming;s->center_slope=slope;s->age_frames=0U;
+    }
+    if(out->ring.road_clear && !approach_open && abs(out->heading)<120 && fresh) {
         float ry=0.f,ryy=0.f,rx=0.f,rxy=0.f,points=0.f;
         for(unsigned y=guide;y<end;++y) if(out->row_valid[y]) {
             float dy=(float)y-(float)near,x=out->center[y];
@@ -647,6 +736,7 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
             out->ring.reference_valid=1U;
         }
         s->width_near+=0.1f*(wn-s->width_near);s->width_slope+=0.1f*(ws-s->width_slope);
+        if(s->learned_frames<UINT8_MAX) ++s->learned_frames;
     }
     /* Exit uses only current straight fits; no current circular midpoint is saved. */
     if(out->ring.edge_line_valid[0] || out->ring.edge_line_valid[1]) {

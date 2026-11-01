@@ -67,7 +67,8 @@ typedef struct {
  * from the image and each other. threshold receives the enhanced-domain value.
  * Returns 0 without mutation on invalid arguments, 1 after processing.
  * Sizes up to 480 rows, 752 columns. Constant/weakly separated ground is
- * rejected as black, never forced into two classes. No hardware writes.
+ * reported with threshold=255 (invalid for control); current binary preview
+ * is retained using the previous threshold or a fallback. No hardware writes.
  */
 uint8_t image_track_preprocess(uint8_t *image, uint16_t rows, uint16_t cols,
                                uint16_t roi_first, uint16_t roi_end,

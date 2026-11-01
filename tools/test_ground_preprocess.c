@@ -24,7 +24,9 @@ static uint8_t process(uint16_t rows, uint16_t cols)
         scratch, sizeof(scratch), histogram, &threshold));
     for (uint32_t i = 0; i < (uint32_t)rows * cols; ++i)
         CHECK(image[i] == 0U || image[i] == 255U);
+    if (threshold != 255U)
     track_vision_process(image, rows, cols, &result);
+    else memset(&result, 0, sizeof(result));
     return threshold;
 }
 
@@ -197,6 +199,13 @@ static void captured(const char *path)
 
 int main(int argc, char **argv)
 {
+    /* Weak ground must not erase visible pixels outside the recognition ROI. */
+    memset(image, 0, sizeof(image));
+    memset(image, 255, 60U * 376U);
+    CHECK(process(240, 376) == 255U);
+    CHECK(!result.valid);
+    CHECK(image[20U * 376U + 100U] == 255U);
+    CHECK(image[120U * 376U + 100U] == 0U);
     invalid_input();
     cleanup();
     resolution(120, 188);

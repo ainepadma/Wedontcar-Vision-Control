@@ -16,12 +16,12 @@
 
 #define TRACK_VISION_MAX_ROWS 480
 #define TRACK_VISION_MAX_COLS 752
-// 当前相机安装已确认车体从约 70%H 开始侵入画面；留出 2%H 标定余量，
-// 只处理车体上方的可见赛道，不在固定遮挡区内猜测或补画赛道。
-#define TRACK_VISION_ROI_START_PERCENT 40U
-#define TRACK_VISION_ROI_END_PERCENT 68U
-/* Route association only. Never seed an unrelated distant road above 55%H. */
-#define TRACK_ROUTE_SEED_START_PERCENT 55U
+#include "vision_geometry.h"
+/* All rows are eligible. The lower-third seed anchors connectivity only;
+ * association propagates to the top without erasing image pixels. */
+#define TRACK_VISION_ROI_START_PERCENT VISION_TRACK_START_PERCENT
+#define TRACK_VISION_ROI_END_PERCENT VISION_SEARCH_END_PERCENT
+#define TRACK_ROUTE_SEED_START_PERCENT VISION_NEAR_START_PERCENT
 #define TRACK_ROUTE_MAX_GAP_ROWS 1U
 
 typedef enum track_vision_reject_t
@@ -49,8 +49,17 @@ typedef struct {
     uint8_t valid, confidence;
 } track_path_observation_t;
 
+enum {
+    TRACK_APPROACH_NO_MODEL=1U, TRACK_APPROACH_NO_OPEN=2U,
+    TRACK_APPROACH_BOTH_OPEN=4U, TRACK_APPROACH_EDGE=8U,
+    TRACK_APPROACH_SUPPORT=16U, TRACK_APPROACH_STALE=32U
+};
+
 typedef struct {
     track_path_observation_t path[TRACK_PATH_COUNT];
+    /* Pre-entry corridor only; source names the trusted edge, not turn direction. */
+    track_path_observation_t approach_path;
+    uint8_t approach_source, approach_reject;
     uint8_t model_ready, junction, type_hint;
     int8_t direction_hint; /* +1 left, -1 right; crossing may remain unresolved. */
     uint8_t left_open, right_open, forward_visible, road_clear;
@@ -84,9 +93,10 @@ typedef struct {
 
 typedef struct {
     uint16_t rows, cols;
-    uint8_t ready, age_frames;
+    uint8_t ready, age_frames, learned_frames;
     float width_near, width_slope; /* width(row)=width_near+slope*(row-near_row) */
     float center_near, center_slope;
+    ring_corner_tracker_t corner_tracker;
 } track_ring_vision_state_t;
 
 typedef struct track_vision_result_t
@@ -115,6 +125,8 @@ typedef struct track_vision_result_t
     uint8_t raw_flags[TRACK_VISION_MAX_ROWS]; /* bit0 left, bit1 right */
     uint16_t guide_center[TRACK_PATH_COUNT - 1][TRACK_VISION_MAX_ROWS];
     uint8_t guide_valid[TRACK_PATH_COUNT - 1][TRACK_VISION_MAX_ROWS];
+    uint16_t approach_center[TRACK_VISION_MAX_ROWS];
+    uint8_t approach_valid[TRACK_VISION_MAX_ROWS];
     uint32_t frame_number;
     int16_t error;
     int16_t heading;
@@ -139,9 +151,7 @@ typedef struct track_vision_result_t
 void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
                           track_vision_result_t *out);
 
-/* 仅在本帧视觉计算及发布之后用于屏幕预览。把未连到近处赛道的白斑
- * 从预览图中隐藏；不会修改 result、控制输入或发送前冻结的原始帧。
- * 必须紧跟同一帧的 track_vision_process/track_ring_vision_process 调用。 */
+/* Compatibility no-op: display preserves all current binary pixels. */
 void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols);
 
 /* Call after ordinary processing, once per captured frame, before publishing.

@@ -69,8 +69,11 @@ static void test_display_noise(void)
     uint16_t center = result.center[110U];
     CHECK(image[108U * W + 12U] == 255U);
     CHECK(image[10U * W + 30U] == 255U);
+    uint8_t snapshot[sizeof(image)];
+    memcpy(snapshot, image, sizeof(image));
     track_vision_filter_display(image, H, W);
-    CHECK(image[108U * W + 12U] == 0U);
+    CHECK(memcmp(snapshot, image, sizeof(image)) == 0);
+    CHECK(image[108U * W + 12U] == 255U);
     /* v0.5 restores preview above 30%H; it stays outside control ROI. */
     CHECK(image[10U * W + 30U] == 255U);
     CHECK(image[110U * W + center] == 255U);

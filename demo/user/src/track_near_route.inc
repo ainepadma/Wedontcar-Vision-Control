@@ -26,7 +26,7 @@ static void route_build(const uint8_t *binary,unsigned rows,unsigned cols)
 {
     memset(route_mask,0,sizeof(route_mask));memset(route_previous,0,cols);
     route_seed_ambiguous=0U;
-    unsigned top=rows*30U/100U,end=rows*TRACK_VISION_ROI_END_PERCENT/100U;
+    unsigned top=rows*VISION_SEARCH_START_PERCENT/100U,end=rows*TRACK_VISION_ROI_END_PERCENT/100U;
     unsigned seed_top=rows*TRACK_ROUTE_SEED_START_PERCENT/100U;
     unsigned minimum=cols/16U;if(minimum<6U) minimum=6U;
     uint8_t seeded=0U;unsigned missing=0U;

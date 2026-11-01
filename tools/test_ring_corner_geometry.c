@@ -98,8 +98,47 @@ static void check_no_guides(void)
 {
     for(unsigned k=1U;k<RING_CORNER_GUIDE_COUNT;++k) CHECK(!result.guide[k].valid);
 }
+static void test_reacquire(unsigned side)
+{
+    ring_corner_tracker_t tracker={0};
+    acute(H,W,125U,RING_CORNER_A);if(side) mirror(H,W);
+    process(H,W);CHECK(result.guide[RING_GUIDE_A_LEFT+side].valid);
+    ring_corner_stabilize(image,&ctx,&tracker,&result);
+    CHECK(tracker.valid[side] && !result.continued_mask);
+    for(unsigned i=0U;i<3U;++i) {
+        /* Inject an intermittent discovery miss, without changing current
+         * image evidence. Local tracking must re-fit rather than copy a line. */
+        acute(H,W,127U+2U*i,RING_CORNER_A);if(side) mirror(H,W);
+        process(H,W);memset(result.count,0,sizeof(result.count));
+        memset(result.guide,0,sizeof(result.guide));result.road_clear=1U;
+        ring_corner_stabilize(image,&ctx,&tracker,&result);
+        CHECK(!result.count[0] && !result.count[1]);
+        if(i<2U) {
+            CHECK(result.continued_mask==(1U<<side));
+            CHECK(result.guide[RING_GUIDE_A_LEFT+side].valid && !result.road_clear);
+            CHECK(result.guide[RING_GUIDE_A_LEFT+side].corner_y>125.f+(float)(2U*i));
+            check_guides(H,W);
+        } else {CHECK(!result.continued_mask);check_no_guides();}
+        CHECK(memcmp(image,original,H*W)==0);
+    }
+    process(H,W);ring_corner_stabilize(image,&ctx,&tracker,&result);CHECK(tracker.valid[side]);
+    memset(image,0,H*W);process(H,W);ring_corner_stabilize(image,&ctx,&tracker,&result);
+    CHECK(!result.continued_mask);check_no_guides();
+    acute(H,W,125U,RING_CORNER_A);if(side) mirror(H,W);
+    process(H,W);ring_corner_stabilize(image,&ctx,&tracker,&result);
+    acute(H,W,125U,RING_CORNER_B);if(side) mirror(H,W);
+    process(H,W);ring_corner_stabilize(image,&ctx,&tracker,&result);
+    CHECK(!result.continued_mask && !tracker.valid[side]);
+    acute(H,W,125U,RING_CORNER_A);if(side) mirror(H,W);
+    process(H,W);ring_corner_stabilize(image,&ctx,&tracker,&result);
+    crossing(H,W,0U,125U);process(H,W);
+    ring_corner_stabilize(image,&ctx,&tracker,&result);
+    CHECK(result.count[0]==1U && result.count[1]==1U && !result.continued_mask);
+    CHECK(!tracker.valid[0] && !tracker.valid[1]);
+}
 int main(void)
 {
+    test_reacquire(0U);test_reacquire(1U);
     road(H,W);process(H,W);CHECK(result.count[0]==0U && result.count[1]==0U && result.road_clear);
     crossing(H,W,0U,125U);process(H,W);
     CHECK(result.count[0]==1U && result.count[1]==1U);
