@@ -130,6 +130,10 @@ typedef struct track_vision_result_t
     uint32_t frame_number;
     int16_t error;
     int16_t heading;
+    int16_t near_error, near_heading;
+    uint8_t near_geometry_valid;
+    int16_t bottom_error;
+    uint8_t bottom_valid;
 } track_vision_result_t;
 
 /*

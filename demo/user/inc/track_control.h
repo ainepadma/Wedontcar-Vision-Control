@@ -53,6 +53,12 @@ typedef struct
     track_control_config_t config;
     float filtered_error;
     float filtered_heading;
+    float filtered_near_heading;
+    uint8_t near_geometry_valid;
+    uint8_t bottom_active, bottom_armed, bottom_votes, bottom_center_votes, bottom_seen;
+    int8_t bottom_sign;
+    uint32_t bottom_start_ms, bottom_frame_ms;
+    float bottom_pulse_deg;
     float derivative;
     float servo_angle;
 } track_control_state_t;
@@ -80,6 +86,13 @@ void track_control_init(track_control_state_t *state,
 void track_control_observe(track_control_state_t *state, int16_t error,
                            int16_t heading, uint8_t confidence, uint8_t valid,
                            uint32_t now_ms);
+/* Ordinary path only. Missing near geometry uses the legacy observation. */
+void track_control_observe_near(track_control_state_t *state, int16_t error,
+    int16_t heading, int16_t near_error, int16_t near_heading, uint8_t near_valid,
+    uint8_t confidence, uint8_t valid, uint32_t now_ms);
+/* Call after the accepted same-frame ordinary-path observation. */
+void track_control_observe_bottom(track_control_state_t *state, int16_t error,
+                                  uint8_t valid, uint32_t now_ms);
 void track_control_toggle(track_control_state_t *state, uint32_t now_ms);
 /* Image observations and steering always remain active. This is the track
  * portion of the C14 master protection switch; the ISR applies the same switch

@@ -70,6 +70,10 @@ static uint32_t consumed_frame_generation;
 static volatile struct
 {
     int16_t error, heading;
+    int16_t near_error, near_heading;
+    uint8_t near_geometry_valid;
+    int16_t bottom_error;
+    uint8_t bottom_valid;
     uint8_t confidence, valid, ring_candidate;
     int8_t ring_direction;
     track_ring_observation_t ring;
@@ -115,6 +119,11 @@ void track_frame_publish(const track_vision_result_t *result)
     uint32_t primask = interrupt_global_disable();
     track_mailbox.error = result->error;
     track_mailbox.heading = result->heading;
+    track_mailbox.near_error = result->near_error;
+    track_mailbox.near_heading = result->near_heading;
+    track_mailbox.near_geometry_valid = result->near_geometry_valid;
+    track_mailbox.bottom_error = result->bottom_error;
+    track_mailbox.bottom_valid = result->bottom_valid;
     track_mailbox.confidence = result->confidence;
     track_mailbox.valid = result->valid;
     track_mailbox.ring_candidate = result->ring_candidate;
@@ -287,9 +296,16 @@ void PIT_IRQHandler(void)
                 track_control.derivative_ready = 0U;
                 ring_control.reset_tracking_history = 0U;
             }
-            track_control_observe(&track_control, path.error, path.heading,
+            track_control_observe_near(&track_control, path.error, path.heading,
+                                  track_mailbox.near_error, track_mailbox.near_heading,
+                                  (uint8_t)(track_mailbox.near_geometry_valid &&
+                                    ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
                                   path.confidence, path.valid,
                                   fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
+            track_control_observe_bottom(&track_control, track_mailbox.bottom_error,
+                (uint8_t)(fresh_ring_frame && track_mailbox.bottom_valid &&
+                          ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
+                fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
         }
         if (protection_enabled && ring_control.fault)
             track_control_stop(&track_control, TRACK_STOP_RING);

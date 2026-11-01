@@ -72,7 +72,7 @@ void track_frame_publish(const track_vision_result_t *result);
 
 // 速度目标位于 track_control.h，单位是编码器计数/10ms，不是 RPM 或 m/s。
 // 舵机左右端点仍使用本车原配置；必须架空验证方向和机械限位后才能落地。
-#define TRACK_STEER_KP 0.023f
+#define TRACK_STEER_KP 0.020f
 #define TRACK_STEER_KD 0.0005f
 #define TRACK_SERVO_RATE_DEG_S 120.0f
 

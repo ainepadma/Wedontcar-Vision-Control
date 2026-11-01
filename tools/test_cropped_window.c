@@ -62,15 +62,38 @@ int main(void) {
     memset(&guarded,0xa5,sizeof(guarded));
     road(0,0);process();CHECK(result.valid && result.roi_rows==H);
     CHECK(result.row_valid[0] && result.row_valid[H-1]);CHECK(abs(result.error)<10);
+    CHECK(result.near_geometry_valid && abs(result.near_error)<10 && result.near_heading==0);
+    CHECK(result.bottom_valid && abs(result.bottom_error)<10);
     road(-20,0);process();CHECK(result.valid && result.error<0);
+    CHECK(result.near_error<0 && result.near_heading==0);
+    CHECK(result.bottom_valid && result.bottom_error<0);
     road(20,0);process();CHECK(result.valid && result.error>0);
     road(0,-25);process();CHECK(result.valid && result.heading<0);
+    CHECK(result.near_geometry_valid && result.near_heading<0);
     road(0,25);process();CHECK(result.valid && result.heading>0);
+    CHECK(result.near_geometry_valid && result.near_heading>0);
+    /* Sharp bends remain continuous when one visible boundary reaches the crop. */
+    for (int sign=-1;sign<=1;sign+=2) {
+        road(0,sign*125);process();
+        CHECK(result.valid && result.row_valid[0] && result.row_valid[H-1]);
+        CHECK(sign<0 ? result.left[0]==0 : result.right[0]==W-1);
+        for(unsigned y=1;y<H;++y) CHECK(result.row_valid[y]);
+    }
+    /* Even a one-row separator must not be bridged to the road beyond. */
+    road(0,0);memset(image+80U*W,0,W);process();
+    CHECK(result.row_valid[81] && !result.row_valid[80] && !result.row_valid[79]);
+    CHECK(!result.valid);
+    /* A short black bar only across the centre also blocks the connection. */
+    road(0,0);memset(image+80U*W+140U,0,24U);process();
+    CHECK(result.row_valid[81] && !result.row_valid[79]);
+    /* A tolerated two-pixel run gap cannot put a valid centre on black. */
+    road(0,0);image[80U*W+151U]=0;image[80U*W+152U]=0;process();
+    CHECK(!result.row_valid[80] && !result.row_valid[79]);
     /* Top and bottom beyond the old 30..68% must actually affect observations. */
     road(0,0);for(unsigned y=0;y<30;++y) memset(image+y*W,0,W);
     process();CHECK(!result.row_valid[0] && result.valid_rows<H);
     road(0,0);for(unsigned y=110;y<H;++y) memset(image+y*W,0,W);
-    process();CHECK(!result.row_valid[H-1]);
+    process();CHECK(!result.row_valid[H-1] && !result.bottom_valid);
     for(int side=0;side<2;++side) {acute(40,side);acute(110,side);}
     /* Bilateral junction corners still produce the 270 connect geometry. */
     road(0,0);

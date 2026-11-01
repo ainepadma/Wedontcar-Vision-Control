@@ -508,8 +508,130 @@ static void test_abnormal_inputs(void)
     puts("PASS bounded malformed samples/configuration, finite outputs and null guards");
 }
 
+static float near_case(int sign, int entered, int legacy)
+{
+    track_control_state_t state;
+    track_control_init(&state, &config);
+    track_control_set_loss_stop(&state, 0U);
+    track_control_toggle(&state, 0U);
+    float previous = config.servo_center;
+    for (uint32_t t=20U;t<=600U;t+=20U) {
+        if (legacy) track_control_observe(&state, (int16_t)(sign*200),
+            (int16_t)(sign*200),100U,1U,t);
+        else track_control_observe_near(&state,(int16_t)(sign*200),
+            (int16_t)(sign*200),(int16_t)(entered?sign*80:0),
+            (int16_t)(entered?sign*120:0),1U,100U,1U,t);
+        track_control_output_t o=track_control_tick(&state,t);
+        CHECK(fabsf(o.servo_angle-previous)<=1.2001f);
+        CHECK(o.servo_angle>=75.5f && o.servo_angle<=98.5f);
+        previous=o.servo_angle;
+    }
+    float offset=fabsf(previous-config.servo_center);
+    if (!legacy) {
+        float saved=state.filtered_near_heading;
+        track_control_observe_near(&state,0,0,0,0,1U,100U,1U,600U);
+        CHECK(state.filtered_near_heading==saved); /* duplicate cannot change mode */
+        track_control_observe_near(&state,0,0,0,0,0U,0U,0U,620U);
+        CHECK(!state.near_geometry_valid);
+        CHECK(track_control_tick(&state,620U).servo_angle==previous);
+        track_control_observe_near(&state,0,0,0,0,1U,100U,1U,640U);
+        CHECK(state.derivative==0.0f);
+    }
+    return offset;
+}
+static void test_near_adaptive_steering(void)
+{
+    float mirrored[2];
+    for(int sign=-1;sign<=1;sign+=2) {
+        float approach=near_case(sign,0,0);
+        float baseline=near_case(sign,0,1);
+        float bend=near_case(sign,1,0);
+        CHECK(approach<baseline*0.3f);
+        CHECK(bend>baseline && bend<=11.5f);
+        mirrored[sign>0]=bend;
+    }
+    CHECK(fabsf(mirrored[0]-mirrored[1])<0.001f);
+    /* S bend: distant opposite tangent cannot reverse a strong near turn. */
+    for(int sign=-1;sign<=1;sign+=2) {
+        track_control_state_t state;
+        track_control_init(&state,&config);
+        track_control_set_loss_stop(&state,0U);
+        track_control_toggle(&state,0U);
+        for(uint32_t t=20U;t<=400U;t+=20U) {
+            track_control_observe_near(&state,0,(int16_t)(-sign*200),
+                (int16_t)(sign*80),(int16_t)(sign*120),1U,100U,1U,t);
+            track_control_output_t o=track_control_tick(&state,t);
+            CHECK(sign>0 ? o.servo_angle<87.0f : o.servo_angle>87.0f);
+        }
+        /* Leaving the bend removes gain progressively, no angle jump. */
+        float previous=state.servo_angle;
+        for(uint32_t t=420U;t<=1000U;t+=20U) {
+            track_control_observe_near(&state,0,0,0,0,1U,100U,1U,t);
+            track_control_output_t o=track_control_tick(&state,t);
+            CHECK(fabsf(o.servo_angle-previous)<=1.2001f);
+            previous=o.servo_angle;
+        }
+        CHECK(fabsf(previous-87.0f)<0.1f);
+        track_control_observe_near(&state,100,0,0,0,0U,100U,1U,1020U);
+        CHECK(!state.near_geometry_valid && state.derivative==0.0f);
+    }
+
+    puts("PASS near-adaptive steering: approach suppression, bend boost, mirrors, limits, duplicate and invalid frames");
+}
+
+static void bottom_frame(track_control_state_t *s, int16_t e, uint8_t valid, uint32_t t)
+{
+    track_control_observe_near(s,0,0,0,0,1U,100U,1U,t);
+    track_control_observe_bottom(s,e,valid,t);
+}
+static void test_bottom_pulse(void)
+{
+    for(int sign=-1;sign<=1;sign+=2) {
+        track_control_state_t s;
+        track_control_init(&s,&config);
+        track_control_set_loss_stop(&s,0U); track_control_toggle(&s,0U);
+        bottom_frame(&s,(int16_t)(sign*200),1U,20U);
+        CHECK(!s.bottom_active);
+        track_control_observe_bottom(&s,(int16_t)(sign*200),1U,20U);
+        CHECK(!s.bottom_active); /* duplicate cannot cast a second vote */
+        bottom_frame(&s,(int16_t)(sign*200),1U,40U);
+        CHECK(s.bottom_active && fabsf(s.bottom_pulse_deg)<=2.0f);
+        track_control_output_t o=track_control_tick(&s,40U);
+        CHECK(sign>0 ? o.servo_angle<87.0f : o.servo_angle>87.0f);
+        float previous=o.servo_angle;
+        for(uint32_t t=60;t<=400;t+=20) {
+            bottom_frame(&s,(int16_t)(sign*200),1U,t);
+            o=track_control_tick(&s,t);
+            CHECK(fabsf(o.servo_angle-previous)<=1.2001f);
+            CHECK(o.servo_angle>=75.5f && o.servo_angle<=98.5f);
+            previous=o.servo_angle;
+        }
+        CHECK(!s.bottom_active && !s.bottom_armed && fabsf(o.servo_angle-87.0f)<0.01f);
+        bottom_frame(&s,0,1U,420U);bottom_frame(&s,0,1U,440U);
+        CHECK(s.bottom_armed);
+        bottom_frame(&s,(int16_t)(sign*200),1U,460U);
+        bottom_frame(&s,(int16_t)(sign*200),1U,480U);CHECK(s.bottom_active);
+        bottom_frame(&s,0,0U,500U);CHECK(!s.bottom_active); /* missing bottom */
+        bottom_frame(&s,0,1U,520U);bottom_frame(&s,0,1U,540U);
+        bottom_frame(&s,(int16_t)(sign*200),1U,560U);
+        bottom_frame(&s,(int16_t)(sign*200),1U,580U);CHECK(s.bottom_active);
+        bottom_frame(&s,(int16_t)(-sign*200),1U,600U);CHECK(!s.bottom_active);
+        track_control_stop(&s,TRACK_STOP_MANUAL);CHECK(!s.bottom_active);
+    }
+    track_control_state_t s;
+    track_control_init(&s,&config);track_control_set_loss_stop(&s,0U);
+    track_control_toggle(&s,UINT32_MAX-60U);
+    bottom_frame(&s,100,1U,UINT32_MAX-40U);
+    bottom_frame(&s,100,1U,UINT32_MAX-20U);CHECK(s.bottom_active);
+    bottom_frame(&s,100,1U,20U);check_output(track_control_tick(&s,20U));CHECK(s.bottom_active);
+    bottom_frame(&s,100,1U,140U);check_output(track_control_tick(&s,140U));CHECK(!s.bottom_active);
+    puts("PASS bottom pulse: two-frame direction, cap, expiry, no repeat, recenter rearm, missing/reversal/stop, wrap");
+}
+
 int main(void)
 {
+    test_bottom_pulse();
+    test_near_adaptive_steering();
     test_readiness();
     test_steering_and_speed();
     test_independent_servo_center();

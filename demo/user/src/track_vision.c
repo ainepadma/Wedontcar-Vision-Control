@@ -28,6 +28,28 @@ static int16_t track_clamp_error(int64_t value)
 
 #include "track_near_route.inc"
 
+/* Test the complete pixel connection, including both cells at diagonal steps.
+ * Never bridge a black separator merely because two white runs overlap. */
+static uint8_t track_white_connection(const uint8_t *binary, uint16_t cols,
+                                      int x0, int y0, int x1, int y1)
+{
+    int dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    int dy = y1 > y0 ? y1 - y0 : y0 - y1;
+    int steps = dx > dy ? dx : dy;
+    int px = x0, py = y0;
+    if (!binary[(uint32_t)y0 * cols + x0]) return 0U;
+    for (int i = 1; i <= steps; ++i) {
+        int x = x0 + (x1 - x0) * i / steps;
+        int y = y0 + (y1 - y0) * i / steps;
+        if (!binary[(uint32_t)y * cols + x] ||
+            (x != px && y != py &&
+             (!binary[(uint32_t)py * cols + x] ||
+              !binary[(uint32_t)y * cols + px]))) return 0U;
+        px = x; py = y;
+    }
+    return 1U;
+}
+
 /* 仅补回紧贴已确认赛道、在近处单侧出画的连续行。宽度来自同帧
  * 双边界行，不拿屏幕边框当赛道边界，也不跨黑带寻找远处白块。 */
 static void track_extend_clipped_near(const uint8_t *binary, uint16_t cols,
@@ -91,7 +113,8 @@ static void track_extend_clipped_near(const uint8_t *binary, uint16_t cols,
             (int32_t)chosen_left + projected_width / 2 :
             (int32_t)chosen_right - projected_width / 2;
         if (center <= 0 || center >= (int32_t)cols - 1 ||
-            track_distance((uint16_t)center, previous_center) > jump_per_row) break;
+            track_distance((uint16_t)center, previous_center) > jump_per_row ||
+            !track_white_connection(binary, cols, previous_center, y - 1U, center, y)) break;
         out->left[y] = chosen_left;
         out->right[y] = chosen_right;
         out->center[y] = (uint16_t)center;
@@ -191,15 +214,14 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
             }
 
             const uint16_t width = end - start + 1U;
-            if (start == 0U || end == cols - 1U ||
-                width < minimum_width || width > maximum_width ||
+            if (width < minimum_width || width > maximum_width ||
                 (uint32_t)white_pixels * 4U < (uint32_t)width * 3U)
                 continue;
 
             ++shape_candidates;
 
             const uint16_t center = (start + end) / 2U;
-            if(!route_member(row,center)) continue;
+            if(!route_member(row,center) || !pixels[center]) continue;
             uint16_t distance = track_distance(center, cols / 2U);
             if (have_previous)
             {
@@ -210,7 +232,8 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
                 distance = track_distance(center, previous_center);
                 if (distance > (uint32_t)jump_per_row * row_gap ||
                     overlap_right < overlap_left ||
-                    overlap_right - overlap_left + 1U < minimum_overlap)
+                    overlap_right - overlap_left + 1U < minimum_overlap ||
+                    !track_white_connection(binary, cols, previous_center, previous_row, center, row))
                 {
                     continue;
                 }
@@ -323,6 +346,39 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
     if (out->reject_flags != TRACK_VISION_REJECT_NONE)
         return;
 
+    /* Same-frame lower-third geometry: split into two populated bands. */
+    uint32_t ns[2] = {0U, 0U};
+    uint16_t nc[2] = {0U, 0U};
+    const uint16_t split = near_start + zone_rows / 2U;
+    for (uint16_t y = near_start; y < roi_end; ++y) {
+        if (!out->row_valid[y]) continue;
+        unsigned band = y < split ? 0U : 1U;
+        ns[band] += out->center[y]; ++nc[band];
+    }
+    if (nc[0] >= track_max(2U, zone_rows / 6U) &&
+        nc[1] >= track_max(2U, zone_rows / 6U)) {
+        out->near_geometry_valid = 1U;
+        out->near_error = track_clamp_error(
+            ((int64_t)2 * near_sum - (int64_t)(cols - 1U) * near_count) * 1000 /
+            ((int64_t)(cols - 1U) * near_count));
+        out->near_heading = track_clamp_error(
+            ((int64_t)ns[0] * nc[1] - (int64_t)ns[1] * nc[0]) * 2000 /
+            ((int64_t)nc[0] * nc[1] * (cols - 1U)));
+    }
+    /* Require a continuous run reaching the actual bottom, not a floating
+     * lowest-detected point higher in the image. Use up to the last five rows. */
+    uint32_t bottom_sum = 0U;
+    uint16_t bottom_count = 0U;
+    for (uint16_t y = roi_end; y > roi_start && bottom_count < 5U; --y) {
+        if (!out->row_valid[y - 1U]) break;
+        bottom_sum += out->center[y - 1U]; ++bottom_count;
+    }
+    if (bottom_count >= 3U) {
+        out->bottom_valid = 1U;
+        out->bottom_error = track_clamp_error(
+            ((int64_t)2 * bottom_sum - (int64_t)(cols - 1U) * bottom_count) * 1000 /
+            ((int64_t)(cols - 1U) * bottom_count));
+    }
     out->valid = 1U;
     out->error = track_clamp_error(
         ((int64_t)2 * weighted_sum - (int64_t)(cols - 1U) * weight_total) * 1000 /
