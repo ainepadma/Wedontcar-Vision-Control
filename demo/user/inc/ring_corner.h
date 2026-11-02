@@ -53,7 +53,7 @@ typedef struct {
     uint8_t entry[2],cross_entry;
     ring_corner_point_t a[2],p[2],v[2],breakpoint[2];
     ring_corner_point_t mouth_upper[2],mouth_lower[2];
-    uint8_t paired_mouth;
+    uint8_t paired_mouth,v_reacquired;
     uint8_t count[2],road_clear,continued_mask; /* bit side: locally reacquired A; never an event vote. */
     ring_corner_point_t point[2][RING_CORNER_MAX_PER_SIDE]; /* Near to far. */
     ring_corner_guide_t guide[RING_CORNER_GUIDE_COUNT];
@@ -67,7 +67,8 @@ typedef struct {
 } ring_corner_context_t;
 
 typedef struct {
-    ring_corner_point_t point[2],upper[2];
+    ring_corner_point_t point[2],upper[2],v[2];
+    uint8_t v_valid[2],v_misses[2];
     uint16_t rows,cols;
     uint8_t valid[2],misses[2];
 } ring_corner_tracker_t;

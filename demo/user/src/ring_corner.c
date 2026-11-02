@@ -238,6 +238,41 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
     g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
     g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
 }
+/* Entry P must belong to an island with a visible outer white flank.
+ * A crest on the image roof/background stripe is not an island point. */
+#define ISLAND_QUEUE 8192U
+static uint32_t island_queue[ISLAND_QUEUE];
+static uint8_t island_seen[(480U*752U+7U)/8U];
+static int island_point(const uint8_t *im,unsigned h,unsigned w,unsigned side,const ring_corner_point_t *p)
+{
+    if(!p->quality) return 0;
+    int x=(int)p->x,y=(int)p->y,dir=side ? 1 : -1;
+    if(y<1 || y>=(int)h-1) return 0;
+    x+=dir;
+    for(unsigned n=0;n<5U && x>0 && x<(int)w-1 && im[(unsigned)y*w+(unsigned)x];++n) x+=dir;
+    if(x<=0 || x>=(int)w-1 || im[(unsigned)y*w+(unsigned)x]) return 0;
+    memset(island_seen,0,sizeof(island_seen));
+    unsigned head=0,tail=1;uint32_t seed=(uint32_t)y*w+(unsigned)x;
+    island_queue[0]=seed;island_seen[seed/8U]|=(uint8_t)(1U<<(seed%8U));
+    unsigned min_y=(unsigned)y,max_y=(unsigned)y;
+    while(head<tail) {
+        uint32_t pos=island_queue[head++];unsigned cy=pos/w,cx=pos%w;
+        if(cx==0 || cy==0 || cx+1==w || cy+1==h) return 0;
+        if(cy<min_y) min_y=cy;
+        if(cy>max_y) max_y=cy;
+        for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
+            uint32_t next=(uint32_t)((int)cy+dy)*w+(unsigned)((int)cx+dx);
+            uint8_t bit=(uint8_t)(1U<<(next%8U));
+            if(!im[next] && !(island_seen[next/8U]&bit)) {
+                if(tail>=ISLAND_QUEUE) return 0;
+                island_seen[next/8U]|=bit;island_queue[tail++]=next;
+            }
+        }
+    }
+    /* Actual island: enclosed black component, not the outer bend/background.
+     * Bounded queue overflow rejects an ambiguous entry rather than wrapping. */
+    return tail>=w*h/400U && max_y-min_y>=h/20U;
+}
 void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corner_context_t *ctx,ring_corner_frame_t *f)
 {
     (void)ctx;if(!f) return;memset(f,0,sizeof(*f));
@@ -281,7 +316,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
     f->road_clear=(uint8_t)(f->paired && !f->gap[0] && !f->gap[1] && f->quality[0]>65 && f->quality[1]>65);
     for(unsigned side=0;side<2;++side)
         f->entry[side]=(uint8_t)(f->gap[side] && f->a[side].quality && f->p[side].quality &&
-            f->p[side].y<f->a[side].y && f->continuous[1-side] && !f->gap[1-side]);
+            f->p[side].y+h*.22f<f->a[side].y && island_point(im,h,w,side,&f->p[side]) && f->continuous[1-side] && !f->gap[1-side]);
     for(unsigned side=0;side<2;++side) mouth(side,h,w,f);
     f->paired_mouth=(uint8_t)(f->mouth_lower[0].quality && f->mouth_lower[1].quality &&
         fabsf(f->mouth_lower[0].y-f->mouth_lower[1].y)<h*.20f &&
@@ -314,7 +349,10 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         if(stage==2 && p.quality) segment(g,side,p.x,p.y,outer,h-1);
         if(stage==3 && v.quality) segment(g,other,v.x,v.y,b[other][h-2],h-1);
         if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);
-        if((stage==5 || stage==6) && bp.quality) {
+        if((stage==5 || stage==6) && f->a[other].quality) {
+            /* Prefer the actual black-tip vertex over the last scanline loss.
+             * The overlay A and the virtual boundary share the same endpoint. */
+            if(f->a[other].quality) bp=f->a[other];
             /* User's exit sketch: close the local mouth from its lower outer
              * corner to the REAL upper cross-boundary, not an image corner.
              * Probe one quarter of the near lane width inward, then search
@@ -383,6 +421,37 @@ void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ri
                 f->guide[RING_GUIDE_270_EXTEND]=*g;
             }
         }
+    }
+    /* Reacquire a temporarily missed V from CURRENT contour samples. Smaller
+     * support is allowed only inside the previous vertex neighbourhood; a
+     * rounded ordinary bend cannot establish a new V through this tracker. */
+    for(unsigned side=0;side<2;++side) {
+        if(!f->v[side].quality && s->v_valid[side]) {
+            float best=1e9f;ring_corner_point_t vertex;memset(&vertex,0,sizeof(vertex));
+            for(unsigned i=3;i+3<length[side];++i) {
+                int x=edge[side][i][0],y=edge[side][i][1];
+                float dx=x-s->v[side].x,dy=y-s->v[side].y;
+                if(fabsf(dx)>f->cols*.08f || fabsf(dy)>f->rows*.12f || x<5 || x>=f->cols-5 || y<5 || y>=f->rows-5) continue;
+                int x0=edge[side][i-3][0],y0=edge[side][i-3][1],x1=edge[side][i+3][0],y1=edge[side][i+3][1];
+                if(y0>y || y1>y || y0+y1>2*y-2 || (x0-x)*(x1-x)>=0) continue;
+                if(!black_patch(im,f->cols,x,y-3) || black_patch(im,f->cols,x,y+3)) continue;
+                float distance=dx*dx+dy*dy;
+                if(distance<best) {best=distance;vertex=point(x,y,RING_CORNER_B);}
+            }
+            if(vertex.quality) {
+                f->v[side]=vertex;f->v_reacquired|=(uint8_t)(1U<<side);
+                unsigned other=1U-side;
+                ring_corner_guide_t *g=&f->guide[ring_pdf_guide(3,side)];memset(g,0,sizeof(*g));
+                segment(g,other,vertex.x,vertex.y,b[other][f->rows-2],f->rows-1);finish(im,f->rows,f->cols,g);
+                g=&f->guide[ring_pdf_guide(4,other)];memset(g,0,sizeof(*g));
+                segment(g,side,vertex.x,vertex.y,side ? f->cols-1.f : 0.f,f->rows-1);finish(im,f->rows,f->cols,g);
+                g=&f->guide[ring_pdf_guide(7,side)];memset(g,0,sizeof(*g));
+                float anchor=side ? fminf(b[side][f->rows-2],f->cols*.75f) : fmaxf(b[side][f->rows-2],f->cols*.25f);
+                segment(g,side,vertex.x,vertex.y,anchor,f->rows-1);finish(im,f->rows,f->cols,g);
+            }
+        }
+        if(f->v[side].quality && !(f->v_reacquired&(1U<<side))) {s->v[side]=f->v[side];s->v_valid[side]=1;s->v_misses[side]=0;}
+        else if(s->v_misses[side]<3) ++s->v_misses[side];else s->v_valid[side]=0;
     }
     for(unsigned side=0;side<2;++side) {
         if(f->paired_mouth && f->guide[RING_GUIDE_270_CONNECT].valid) {

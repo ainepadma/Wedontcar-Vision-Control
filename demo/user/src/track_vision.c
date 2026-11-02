@@ -1,6 +1,7 @@
 #include "track_vision.h"
 
 #include <string.h>
+#include <math.h>
 
 static uint16_t track_max(uint16_t a, uint16_t b)
 {
@@ -214,7 +215,7 @@ static void track_extend_clipped_near(const uint8_t *binary, uint16_t cols,
     }
 }
 
-void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
+static void track_vision_strict(const uint8_t *binary, uint16_t rows, uint16_t cols,
                           track_vision_result_t *out)
 {
     if (out == NULL)
@@ -524,6 +525,79 @@ void track_vision_process(const uint8_t *binary, uint16_t rows, uint16_t cols,
         ((int64_t)near_count * far_count * (cols - 1U)));
 }
 
+/* Complete the visible main white band instead of dropping the entire frame
+ * for missing far coverage. Current pixels, near ownership, run overlap and
+ * a bounded local seam govern association; no full-white chord is required. */
+void track_vision_process(const uint8_t *image,uint16_t rows,uint16_t cols,track_vision_result_t *out)
+{
+    track_vision_strict(image,rows,cols,out);
+    if(!out || !image || rows<10 || rows>TRACK_VISION_MAX_ROWS || cols<16 || cols>TRACK_VISION_MAX_COLS) return;
+    unsigned top=rows*TRACK_VISION_ROI_START_PERCENT/100U,end=rows*TRACK_VISION_ROI_END_PERCENT/100U;
+    unsigned previous=end,pl=0,pr=0,pc=cols/2U,seeded=0,changed=0,minimum=track_max(3U,cols/24U);
+    for(unsigned next=end;next>top;--next) {
+        unsigned y=next-1U;
+        if(!seeded && y<top+(end-top)/2U) break;
+        unsigned gap=seeded ? previous-y : 1U;
+        if(seeded && gap>track_max(3U,(uint16_t)(rows/16U))) break;
+        unsigned best_l=0,best_r=0,best_c=0;float best=1e9f;
+        const uint8_t *pix=image+y*cols;
+        for(unsigned x=0;x<cols;) {
+            while(x<cols && !pix[x]) ++x;
+            unsigned l=x,r=x,white=0,missing=0;
+            for(;x<cols;++x) {
+                if(pix[x]) {r=x;++white;missing=0;}else if(++missing>2U) {++x;break;}
+            }
+            if(white<minimum || r<l || r-l+1U<minimum || white*4U<(r-l+1U)*3U) continue;
+            unsigned width=r-l+1U;
+            if(!seeded && width*100U>cols*96U) continue;
+            unsigned c=(l+r)/2U;
+            if(!pix[c]) {
+                unsigned d=1;while(d<width && !((c>=l+d && pix[c-d]) || (c+d<=r && pix[c+d]))) ++d;
+                if(d>=width) continue;
+                c=c>=l+d && pix[c-d] ? c-d : c+d;
+            }
+            float distance=fabsf((float)c-pc);
+            if(seeded) {
+                int overlap=(int)track_min((uint16_t)r,(uint16_t)pr)-(int)track_max((uint16_t)l,(uint16_t)pl)+1;
+                if(overlap<1 || distance>(float)cols*.08f+(float)gap*(float)cols*.035f) continue;
+                if(width*4U<pr-pl+1U) continue;
+            }
+            float score=distance+(seeded ? fabsf((float)width-(float)(pr-pl+1U))*.08f : 0.f);
+            if(score<best) {best=score;best_l=l;best_r=r;best_c=c;}
+        }
+        if(best==1e9f) continue;
+        if(!out->row_valid[y]) {
+            out->left[y]=(uint16_t)best_l;out->right[y]=(uint16_t)best_r;
+            out->center[y]=(uint16_t)best_c;out->row_valid[y]=1;++changed;
+        }
+        previous=y;pl=out->left[y];pr=out->right[y];pc=out->center[y];seeded=1;
+    }
+    if(!changed && out->valid && !out->edge_rescue) return;
+    unsigned count=0,near=0,far=0,first=end,last=top;
+    uint32_t road_area=0;
+    uint32_t sum=0,weights=0,ns=0,fs=0;unsigned nc=0,fc=0;
+    for(unsigned y=top;y<end;++y) if(out->row_valid[y]) {if(first==end) first=y;last=y;++count;road_area+=(uint32_t)out->right[y]-out->left[y]+1U;}
+    if(count<track_max(3U,(uint16_t)(rows/6U)) || road_area<(uint32_t)rows*cols/32U) return;
+    unsigned band=track_max(1U,(uint16_t)((last-first+1U)/3U));
+    for(unsigned y=top;y<end;++y) if(out->row_valid[y]) {
+        unsigned c=out->center[y],weight=y>=end-(end-top)/3U ? 3U : (y<top+(end-top)/3U ? 1U : 2U);
+        sum+=c*weight;weights+=weight;
+        if(y>=end-(end-top)/3U) ++near;
+        if(y<top+(end-top)/3U) ++far;
+        if(y+band>last) {ns+=c;++nc;}
+        if(y<first+band) {fs+=c;++fc;}
+    }
+    out->valid_rows=(uint16_t)count;out->near_valid_rows=(uint16_t)near;out->far_valid_rows=(uint16_t)far;
+    if(!seeded || near<track_max(3U,(uint16_t)(rows/12U)) || !weights || !nc || !fc) return;
+    out->valid=1;out->reject_flags=0;out->edge_rescue=0;
+    out->confidence=(uint8_t)(count*100U/(last-first+1U));
+    out->error=track_clamp_error(((int64_t)2*sum-(int64_t)(cols-1U)*weights)*1000/((int64_t)(cols-1U)*weights));
+    out->heading=track_clamp_error(((int64_t)fs*nc-(int64_t)ns*fc)*2000/((int64_t)nc*fc*(cols-1U)));
+    out->near_error=out->error;out->near_heading=out->heading;out->near_geometry_valid=0;
+    /* The ordinary controller receives the recovered current-frame geometry.
+     * Its own limits, speed policy and loss protections remain unchanged. */
+}
+
 void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols)
 {
     /* Compatibility entry point: preview masking has been removed. */
@@ -590,3 +664,4 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     } else if(v->cross_entry) {out->ring.type_hint=TRACK_RING_270;out->ring.entry_score=85;}
     out->ring_candidate=out->ring.junction;out->ring_direction=out->ring.direction_hint;
 }
+

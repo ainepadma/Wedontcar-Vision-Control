@@ -93,14 +93,14 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
     switch(s->corner_stage) {
     case 1: if(confirmed(s,!f->a[in].quality && f->bottom_open[in] && f->p[in].quality && f->continuous[out])) stage(s,2,now);break;
     case 2: if(confirmed(s,f->v[in].quality && !f->p[in].quality && f->continuous[out])) stage(s,3,now);break;
-    case 3: if(confirmed(s,!f->v[in].quality && ((f->v[out].quality && f->v[out].y>f->rows*.35f) || f->paired))) stage(s,4,now);break;
+    case 3: if(confirmed(s,(!f->v[in].quality || (f->v_reacquired&(1U<<in))) && f->v[out].quality && !(f->v_reacquired&(1U<<out)) && f->v[out].y>f->rows*.50f)) stage(s,4,now);break;
     case 4: if(confirmed(s,f->paired && (!f->v[out].quality || f->v[out].y<f->rows*.25f))) {stage(s,5,now);s->entry_passed=1;}break;
     case 5:
         /* Only arm a revisit after paired in-ring road and disappearance of
          * the first V. A held/visible first junction cannot be an exit. */
         if(confirmed(s,f->paired && !f->v[in].quality)) {s->exit_gap_seen=1;stage(s,6,now);}
         break;
-    case 6: if(confirmed(s,s->exit_gap_seen && f->v[in].quality)) stage(s,7,now);break;
+    case 6: if(confirmed(s,s->exit_gap_seen && f->v[in].quality && !(f->v_reacquired&(1U<<in)))) stage(s,7,now);break;
     case 7: if(confirmed(s,f->road_clear)) complete(s);break;
     default: break;
     }
@@ -119,6 +119,8 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
         (s->corner_stage==2 ? RING_GUIDE_NONE :
          (f->guide[RING_GUIDE_270_CONNECT].valid ? RING_GUIDE_270_CONNECT : RING_GUIDE_270_EXTEND));
     const ring_corner_guide_t *g=&f->guide[id];
+    if(s->kind==TRACK_RING_360 && (s->corner_stage==5 || s->corner_stage==6) &&
+       !g->boundary[0].valid && !g->boundary[1].valid) id=RING_GUIDE_NONE;
     if(id && g->valid) {
         s->corner_selected_guide=*g;s->corner_guide_id=(uint8_t)id;s->corner_have_guide=1;
         s->corner_guide_frame_number=f->frame_number;s->corner_last_guide_ms=s->last_frame_ms;
@@ -133,8 +135,8 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
         s->line_active=0;s->corner_guide_id=0;s->path_mode=TRACK_PATH_NORMAL;
         s->selected_path=obs->path[0];return s->selected_path;
     }
-    if(s->corner_have_guide && s->last_frame_ms-s->corner_last_guide_ms<=RING_CORNER_HOLD_MS) {
-        s->corner_guide_held=1;return s->selected_path;
-    }
-    s->selected_path=invalid();return s->selected_path;
+    /* Never turn a visible main road into an invalid frame just because a
+     * ring landmark went missing. Retain the ring phase and direction. */
+    s->line_active=0;s->corner_guide_id=0;s->path_mode=TRACK_PATH_NORMAL;
+    s->selected_path=obs->path[0];return s->selected_path;
 }

@@ -528,9 +528,6 @@ static uint8_t screen_preview_guide(const ring_corner_frame_t *v)
         unsigned id=ring_pdf_guide(1,side);
         if(v->guide[id].valid) return (uint8_t)id;
     }
-    unsigned bridge=ring_pdf_guide(5,0);
-    if(v->guide[bridge].valid && v->guide[bridge].boundary[1].valid && !v->guide[bridge].boundary[0].valid)
-        return (uint8_t)bridge;
     return RING_GUIDE_NONE;
 }
 /* Display-only state. No control mailbox, actuator or ISR writes. */
@@ -594,7 +591,7 @@ static void screen_draw_track_overlay(void)
         /* The approach array belongs to this image; rejected rows stay gaps. */
         if(screen_approach_source!=TRACK_PATH_NORMAL && screen_track_result.approach_valid[row])
             screen_point((float)screen_track_result.approach_center[row],(float)row,RGB565_GREEN);
-        else if(screen_path_source=='N' && screen_track_result.row_valid[row])
+        else if(screen_guide_id==RING_GUIDE_NONE && screen_track_result.row_valid[row])
             screen_point((float)screen_track_result.center[row],(float)row,RGB565_GREEN);
     }
     for(unsigned side=0U;side<2U;++side) for(unsigned i=0U;i<corners->count[side] && i<RING_CORNER_MAX_PER_SIDE;++i) {

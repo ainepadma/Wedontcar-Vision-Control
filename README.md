@@ -1,3 +1,5 @@
+> 当前版本：中线恢复及环岛第三轮修复见 [docs/RING_REVISION3.md](docs/RING_REVISION3.md)，测试 tools/test_ring_revision3.ps1。
+
 > 当前版本：见 [docs/RING_REVISION2.md](docs/RING_REVISION2.md)，测试入口 tools/test_ring_revision2.ps1。
 
 > 本次 270/360 环岛视觉替换与测试说明见 [docs/PDF_RING.md](docs/PDF_RING.md)，历史 ZORE/v0.6 环岛说明不代表当前实现。
