@@ -19,7 +19,8 @@ typedef enum {
     RING_GUIDE_A_LEFT, RING_GUIDE_A_RIGHT,
     RING_GUIDE_B_BRANCH_LEFT, RING_GUIDE_B_BRANCH_RIGHT,
     RING_GUIDE_B_MAIN_LEFT, RING_GUIDE_B_MAIN_RIGHT,
-    RING_CORNER_GUIDE_COUNT
+    RING_GUIDE_PDF_BASE,
+    RING_CORNER_GUIDE_COUNT=RING_GUIDE_PDF_BASE+14
 } ring_corner_guide_id_t;
 
 typedef struct {
@@ -46,6 +47,11 @@ typedef struct {
 typedef struct {
     uint32_t frame_number;
     uint16_t rows,cols,detector_near_row; /* Last vertex row supported by every sampling radius. */
+    uint16_t border[2][480], border_index[2][480];
+    uint8_t border_flags[480];
+    uint8_t quality[2],continuous[2],gap[2],bottom_open[2],paired;
+    uint8_t entry[2],cross_entry;
+    ring_corner_point_t a[2],p[2],v[2],breakpoint[2];
     uint8_t count[2],road_clear,continued_mask; /* bit side: locally reacquired A; never an event vote. */
     ring_corner_point_t point[2][RING_CORNER_MAX_PER_SIDE]; /* Near to far. */
     ring_corner_guide_t guide[RING_CORNER_GUIDE_COUNT];
@@ -73,4 +79,5 @@ void ring_corner_process(const uint8_t *binary,uint16_t rows,uint16_t cols,
  * guides are recomputed from CURRENT pixels, and expire after two misses. */
 void ring_corner_stabilize(const uint8_t *binary,const ring_corner_context_t *context,
                           ring_corner_tracker_t *tracker,ring_corner_frame_t *out);
+unsigned ring_pdf_guide(unsigned stage,unsigned side);
 #endif
