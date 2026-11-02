@@ -553,6 +553,7 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     if(!RING_FEATURE_ENABLED) return;
     ring_corner_process(binary,rows,cols,0,&out->ring.corners);
     ring_corner_frame_t *v=&out->ring.corners;
+    ring_corner_stabilize(binary,0,&s->corner_tracker,v);
     v->frame_number=out->frame_number;
     for(unsigned y=0;y<rows && y<TRACK_VISION_MAX_ROWS;++y) {
         out->raw_left[y]=v->border[0][y];out->raw_right[y]=v->border[1][y];
@@ -565,7 +566,19 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
         int px=(int)point->x+(side ? -3 : 3),py=(int)point->y;
         if(px<0 || px>=cols || py<0 || py>=rows || !route_member((unsigned)py,(unsigned)px)) v->entry[side]=0;
     }
-    if(out->edge_rescue || out->near_only || out->valid_rows==0) v->cross_entry=0;
+    if(v->paired_mouth) {
+        for(unsigned side=0;side<2;++side) {
+            int x=(int)v->mouth_lower[side].x+(side ? -4 : 4);
+            unsigned y=(unsigned)v->mouth_lower[side].y+2U;
+            if(x<0 || x>=cols || y>=rows || !route_member(y,(unsigned)x)) v->paired_mouth=0;
+            x=(int)v->mouth_upper[side].x+(side ? -4 : 4);
+            y=(unsigned)v->mouth_upper[side].y+2U;
+            if(x<0 || x>=cols || y>=rows || !route_member(y,(unsigned)x)) v->paired_mouth=0;
+        }
+        if(!v->paired_mouth) v->cross_entry=0;
+    }
+    if(!v->paired_mouth && (out->edge_rescue || out->near_only || out->valid_rows==0)) v->cross_entry=0;
+    if(v->paired_mouth) {v->entry[0]=0;v->entry[1]=0;v->cross_entry=1;}
     out->ring.left_quality=v->quality[0];out->ring.right_quality=v->quality[1];
     out->ring.left_open=v->gap[0];out->ring.right_open=v->gap[1];
     out->ring.near_paired=v->paired;out->ring.road_clear=v->road_clear;

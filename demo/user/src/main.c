@@ -522,12 +522,28 @@ static void screen_point(float x,float y,uint16_t color)
 }
 static uint8_t screen_preview_guide(const ring_corner_frame_t *v)
 {
+    if(v->paired_mouth && v->guide[RING_GUIDE_270_CONNECT].valid) return RING_GUIDE_270_CONNECT;
     if(v->cross_entry && v->guide[RING_GUIDE_270_EXTEND].valid) return RING_GUIDE_270_EXTEND;
     for(unsigned side=0;side<2;++side) if(v->entry[side]) {
         unsigned id=ring_pdf_guide(1,side);
         if(v->guide[id].valid) return (uint8_t)id;
     }
+    unsigned bridge=ring_pdf_guide(5,0);
+    if(v->guide[bridge].valid && v->guide[bridge].boundary[1].valid && !v->guide[bridge].boundary[0].valid)
+        return (uint8_t)bridge;
     return RING_GUIDE_NONE;
+}
+/* Display-only state. No control mailbox, actuator or ISR writes. */
+static ring_control_state_t screen_preview_state;
+static uint8_t screen_preview_ready;
+static void screen_preview_observe(uint32_t now)
+{
+    if(motor_enabled) {screen_preview_ready=0U;return;}
+    if(!screen_preview_ready) {ring_control_init(&screen_preview_state);screen_preview_ready=1U;}
+    /* Hand-push preview has no motion deadline; real driving still calls tick
+     * with the original timeout and stale-frame protection in the ISR. */
+    ring_control_observe(&screen_preview_state,&track_result.ring,now,1U);
+    (void)ring_control_select_path(&screen_preview_state,&track_result.ring);
 }
 static void screen_draw_track_overlay(void)
 {
@@ -535,14 +551,16 @@ static void screen_draw_track_overlay(void)
     screen_ring_snapshot=ring_control;
     uint8_t running=motor_enabled;
     interrupt_global_enable(primask);
+    if(!running && !screen_ring_snapshot.fault && screen_preview_ready)
+        screen_ring_snapshot=screen_preview_state;
     const ring_control_state_t *state=&screen_ring_snapshot;
     const ring_corner_frame_t *corners=&screen_track_result.ring.corners;
     uint8_t same_frame=(uint8_t)(!RING_FEATURE_ENABLED || state->corner_frame_number==screen_track_result.frame_number);
     uint8_t approach_valid=(uint8_t)(screen_track_result.ring.approach_path.valid &&
         (screen_track_result.ring.approach_source==TRACK_PATH_LEFT || screen_track_result.ring.approach_source==TRACK_PATH_RIGHT));
-    screen_guide_id=RING_GUIDE_NONE;screen_path_preview=0U;screen_approach_source=TRACK_PATH_NORMAL;
+    screen_guide_id=RING_GUIDE_NONE;screen_path_preview=(uint8_t)(!running && screen_preview_ready);screen_approach_source=TRACK_PATH_NORMAL;
     screen_path_source=state->fault ? '?' : 'N';
-    if(!running && !state->fault) {
+    if(!running && !state->fault && !state->action_locked) {
         if(approach_valid) {
             screen_approach_source=screen_track_result.ring.approach_source;
             screen_path_preview=1U;
@@ -763,6 +781,7 @@ int main(void)
             if (!track_result.valid)
                 ++invalid_vision_frames;
             track_frame_publish(&track_result);
+            screen_preview_observe(timer_get(GPT_TIM_1));
 
             uint32_t display_now = timer_get(GPT_TIM_1);
             if (screen_enabled && (displayed_frames == 0U ||

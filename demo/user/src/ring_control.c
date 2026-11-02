@@ -64,8 +64,8 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         return;
     }
     if(!s->action_locked) {
-        unsigned kind=f->entry[0] || f->entry[1] ? TRACK_RING_360 :
-            (f->cross_entry && f->guide[RING_GUIDE_270_EXTEND].valid ? TRACK_RING_270 : 0);
+        unsigned kind=f->cross_entry && f->guide[RING_GUIDE_270_EXTEND].valid ? TRACK_RING_270 :
+            (f->entry[0] || f->entry[1] ? TRACK_RING_360 : 0);
         unsigned side=f->entry[1] ? 1 : 0;
         if(!kind) {s->vote_frames=0;return;}
         if(kind!=s->vote_kind || side!=s->vote_side) s->vote_frames=0;
@@ -96,10 +96,11 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
     case 3: if(confirmed(s,!f->v[in].quality && ((f->v[out].quality && f->v[out].y>f->rows*.35f) || f->paired))) stage(s,4,now);break;
     case 4: if(confirmed(s,f->paired && (!f->v[out].quality || f->v[out].y<f->rows*.25f))) {stage(s,5,now);s->entry_passed=1;}break;
     case 5:
-        if(f->gap[out]) s->exit_gap_seen=1;
-        if(confirmed(s,s->exit_gap_seen && f->bottom_open[in] && !f->bottom_open[out])) stage(s,6,now);
+        /* Only arm a revisit after paired in-ring road and disappearance of
+         * the first V. A held/visible first junction cannot be an exit. */
+        if(confirmed(s,f->paired && !f->v[in].quality)) {s->exit_gap_seen=1;stage(s,6,now);}
         break;
-    case 6: if(confirmed(s,f->gap[in] && f->breakpoint[in].quality)) stage(s,7,now);break;
+    case 6: if(confirmed(s,s->exit_gap_seen && f->v[in].quality)) stage(s,7,now);break;
     case 7: if(confirmed(s,f->road_clear)) complete(s);break;
     default: break;
     }
@@ -115,7 +116,8 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
     if(s->fault || obs->corners.frame_number!=s->corner_frame_number) return invalid();
     const ring_corner_frame_t *f=&obs->corners;
     unsigned id=s->kind==TRACK_RING_360 ? ring_pdf_guide(s->corner_stage,s->direction==1 ? 0 : 1) :
-        (s->corner_stage==2 ? RING_GUIDE_NONE : RING_GUIDE_270_EXTEND);
+        (s->corner_stage==2 ? RING_GUIDE_NONE :
+         (f->guide[RING_GUIDE_270_CONNECT].valid ? RING_GUIDE_270_CONNECT : RING_GUIDE_270_EXTEND));
     const ring_corner_guide_t *g=&f->guide[id];
     if(id && g->valid) {
         s->corner_selected_guide=*g;s->corner_guide_id=(uint8_t)id;s->corner_have_guide=1;
