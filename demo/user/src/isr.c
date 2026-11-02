@@ -43,6 +43,8 @@ int16 encoder_data_1 = 0;
 int16 encoder_data_2 = 0;
 int16 encoder_data_3 = 0;
 int16 encoder_data_4 = 0;
+volatile int32_t encoder_total_l = 0;
+volatile int32_t encoder_total_r = 0;
 volatile uint8_t motor_enabled = 0;
 volatile uint8_t motor_feedback_fault = 0;
 volatile uint8_t protection_enabled = AUTOMATIC_PROTECTION_DEFAULT;
@@ -227,24 +229,39 @@ void PIT_IRQHandler(void)
         encoder_clear_count(ENCODER_1);                // 清空编码器计数
         encoder_data_2 = ENCODER_2_FORWARD_SIGN * encoder_get_count(ENCODER_2);
         encoder_clear_count(ENCODER_2);
+        // 停机时也累计，供手转整圈标定每轮的实际正交计数。
+        encoder_total_l += encoder_data_1;
+        encoder_total_r += encoder_data_2;
         // 分别保留两轮测量值；停机后的滑行也是真实反馈，不伪装成零速。
         speed_real_l = encoder_data_1;
         speed_real_r = encoder_data_2;
         speed_real = speed_real_r; // 兼容旧调试变量，明确仅代表右轮。
 
         // 编码器极性要按实车标定，不能随 DIR 盲目取反或用绝对值掩盖。
-        // 任何反号反馈都先锁定停机，禁止它进入正目标 PID 导致输出增大。
-        if (protection_enabled && track_control.running &&
-            motor_feedback_fault_mask(encoder_data_1, encoder_data_2))
+        // 起步未施加有效PWM时的单个负计数可能是编码器抖动；
+        // 有驱动且连续30ms明显反转才锁停，真正反转仍先于无反馈保护处理。
+        static uint8_t reverse_ticks_l, reverse_ticks_r;
+        if (track_control.running)
         {
-            motor_feedback_fault = motor_feedback_fault_mask(encoder_data_1, encoder_data_2);
+            reverse_ticks_l = ((uint32_t)speed_pwm_l >= 500U && encoder_data_1 <= -3)
+                ? (uint8_t)(reverse_ticks_l < 3U ? reverse_ticks_l + 1U : 3U) : 0U;
+            reverse_ticks_r = ((uint32_t)speed_pwm_r >= 500U && encoder_data_2 <= -3)
+                ? (uint8_t)(reverse_ticks_r < 3U ? reverse_ticks_r + 1U : 3U) : 0U;
+        }
+        else
+            reverse_ticks_l = reverse_ticks_r = 0U;
+        uint8_t reverse_fault = (uint8_t)((reverse_ticks_l >= 3U ? 1U : 0U) |
+                                          (reverse_ticks_r >= 3U ? 2U : 0U));
+        if (reverse_fault)
+        {
+            motor_feedback_fault = reverse_fault;
             track_control_stop(&track_control, TRACK_STOP_ENCODER);
         }
 
         // 编码器反号优先；用上一周期实际 PWM 对应本周期读到的反馈。
         // 单轮连续 500ms 有驱动却几乎无正计数，锁停两轮，防止 PI 堵转加力。
         uint8_t no_feedback = motor_feedback_watchdog_sample(&motor_feedback_watchdog,
-            (uint8_t)(protection_enabled && was_running && track_control.running),
+            (uint8_t)(was_running && track_control.running),
             encoder_data_1, encoder_data_2, (uint32_t)speed_pwm_l, (uint32_t)speed_pwm_r);
         if (no_feedback)
         {
@@ -253,7 +270,7 @@ void PIT_IRQHandler(void)
         }
 
         uint8_t overspeed = motor_overspeed_watchdog_sample(&motor_overspeed_watchdog,
-            (uint8_t)(protection_enabled && was_running && track_control.running),
+            (uint8_t)(was_running && track_control.running),
             encoder_data_1, encoder_data_2, speed_target);
         if (overspeed)
         {
@@ -317,6 +334,10 @@ void PIT_IRQHandler(void)
         // limits as ordinary following. No legacy 360 output may overwrite it.
         if (ring_control.line_active)
             output.target_speed *= constrain_float(RING_STRAIGHT_SPEED_SCALE, 0.1f, 1.0f);
+#if SPEED_BENCH_MODE
+        // 架空时不依赖摄像头识别，也不让视觉转向改变两轮目标。
+        output.servo_angle = SERVO_MOTOR_CENTER;
+#endif
         motor_enabled = output.running;
         motor_switch_state.enabled = output.running;
         track_ready = output.ready;
@@ -326,12 +347,28 @@ void PIT_IRQHandler(void)
 #else
         track_servo_tenths = (int16_t)(output.servo_angle * 10.0f);
 #endif
-        const float target_counts =
+        const float requested_counts =
 #if SERVO_CENTER_TEST_MODE
             0.0f;
+#elif SPEED_BENCH_MODE
+            (speed_full_enabled ? TRACK_SPEED_FULL_STRAIGHT : 80.0f);
 #else
-            output.target_speed * (speed_full_enabled ? TRACK_SPEED_FULL_SCALE : 1.0f);
+            (speed_full_enabled
+                ? TRACK_SPEED_FULL_CURVE_MIN +
+                    constrain_float((output.target_speed - TRACK_SPEED_CURVE_MIN) /
+                        (TRACK_SPEED_STRAIGHT - TRACK_SPEED_CURVE_MIN), 0.0f, 1.0f) *
+                    (TRACK_SPEED_FULL_STRAIGHT - TRACK_SPEED_FULL_CURVE_MIN)
+                : output.target_speed);
 #endif
+        // 每10ms最多增加3个计数目标；减速立即更新目标，保持弯道降速响应。
+        static float ramped_counts;
+        if (!motor_enabled)
+            ramped_counts = 0.0f;
+        else if (requested_counts > ramped_counts + 3.0f)
+            ramped_counts += 3.0f;
+        else
+            ramped_counts = requested_counts;
+        const float target_counts = ramped_counts;
         speed_target = target_counts;
         if (button_pressed || was_running != motor_enabled)
         {
@@ -358,11 +395,14 @@ void PIT_IRQHandler(void)
             speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
 #else
             // 舵机只在用户启动且视觉有效时输出，控制器已经完成角度限幅与限速。
-            pwm_set_duty(SERVO_MOTOR_PWM, SERVO_MOTOR_DUTY(output.servo_angle));
+            // SPEED_BENCH_MODE 下锁死中位：架空时前轮不受力，但落地测试必须让前轮
+            // 保持直行，否则车身会被前轮带偏、扯紧线缆，测到的速度环数据全部失真。
+            pwm_set_duty(SERVO_MOTOR_PWM,
+                SPEED_BENCH_MODE ? SERVO_MOTOR_DUTY(SERVO_MOTOR_CENTER) : SERVO_MOTOR_DUTY(output.servo_angle));
             // 保留已实测极性与曲率降速关系；有界 PI 增加低速负载补偿。
-            // t=1 表示一个 10ms 采样周期，不是 1 秒；P=50、I=0.2、D=0。
+            // t=1 表示一个 10ms 采样周期，不是 1 秒；P=25、I=0.3、D=0。
             // 差速仅拆分轮速目标：右转左轮快，左转右轮快；公共速度不变。
-            const float differential = (ring_control.action_locked && ring_control.kind == TRACK_RING_360) ? 0.0f : Speed_Differential_Delta(target_counts,
+            const float differential = SPEED_BENCH_MODE || (ring_control.action_locked && ring_control.kind == TRACK_RING_360) ? 0.0f : Speed_Differential_Delta(target_counts,
                 (output.servo_angle - SERVO_MOTOR_CENTER) * SERVO_DIR);
             const float target_left = target_counts + differential;
             const float target_right = target_counts - differential;

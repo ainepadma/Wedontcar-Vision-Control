@@ -3,14 +3,18 @@
 #include <math.h>
 
 // 暗部增强及地面区域阈值；上方灯光与底部车体不参与阈值估计。
-// C13 控制启停；C14 开启时需赛道有效，关闭时只保留人工停机和 PWM 硬限幅。
+// C13 控制启停；赛道版 C14 默认关闭视觉保护，编码器保护始终有效。
 #define CAMERA_SEND_RAW 1
 #define CAMERA_TUNING_EXPOSURE 1024U
+// 台架调速度环时的遥测方式：1=逐飞助手虚拟示波器（二进制），0=#SPD 文本。
+// 两者不能同时发：ASCII 文本会打断示波器的二进制帧解析。
+#define SPEED_SCOPE_MODE 0
 // Auto black-level calibration uses dark reference pixels; exposure stays manual.
 // 0 keeps the driver default manual black-level calibration.
 #define CAMERA_TUNING_AUTO_BLACK_LEVEL 1U
 #define TRACK_DISPLAY_WIDTH 125U
 #define TRACK_DISPLAY_HEIGHT 100U
+#define SCREEN_FRAME_PERIOD_MS 100U
 #define IMU_AXIS_TEST_MODE 0
 static uint8_t camera_exposure_status;
 static uint8_t screen_enabled = 1;
@@ -103,6 +107,7 @@ uint32_t hist_gram[256];
 static uint8_t image_filter_scratch[5U * MT9V03X_W];
 static image_track_preprocess_state_t image_preprocess_state;
 static track_vision_result_t track_result;
+static track_vision_result_t screen_track_result;
 static ring_control_state_t screen_ring_snapshot;
 static uint8_t screen_guide_id,screen_path_preview,screen_approach_source;
 static char screen_path_source='N';
@@ -194,7 +199,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.9.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u BE=%d BV=%u\r\n",
+        "#CAM FW=0.20.1 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -246,6 +251,8 @@ static void assistant_send_image(void)
         (unsigned int)track_result.ring.corners.continued_mask,
         (int)track_result.near_error, (int)track_result.near_heading,
         (unsigned int)track_result.near_geometry_valid,
+        (unsigned int)track_result.near_only,
+        (unsigned int)track_result.edge_rescue,
         (int)track_result.bottom_error, (unsigned int)track_result.bottom_valid);
     if (prefix_length <= 0 || (uint32_t)prefix_length >= CAMERA_DIAGNOSTIC_SIZE)
         return;
@@ -263,6 +270,97 @@ static void assistant_send_image(void)
     camera_tx_length = (uint32_t)prefix_length + sizeof(header) + sizeof(image);
     LPUART_EnableInterrupts(LPUART1, kLPUART_TxDataRegEmptyInterruptEnable);
 }
+
+#if SPEED_BENCH_MODE && !SPEED_SCOPE_MODE
+// 架空调速只发短文本，避免灰度图把10ms速度环采样拖成约4秒一条。
+static void assistant_send_speed(uint32_t now)
+{
+    static uint32_t last_ms;
+    if ((uint32_t)(now - last_ms) < 50U || camera_tx_length != 0U)
+        return;
+    last_ms = now;
+    uint32_t primask = interrupt_global_disable();
+    uint8_t running = motor_enabled, fault = motor_feedback_fault;
+    uint8_t full = speed_full_enabled, protection = protection_enabled;
+    uint8_t stop = track_stop_reason;
+    float target = speed_target, left = speed_real_l, right = speed_real_r;
+    float lpwm = speed_pwm_l, rpwm = speed_pwm_r;
+    int32_t left_total = encoder_total_l, right_total = encoder_total_r;
+    interrupt_global_enable(primask);
+    int length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
+        "#SPD FW=0.20.1 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
+        (unsigned long)now, (unsigned int)running, (unsigned int)protection,
+        (unsigned int)full, (unsigned int)stop, (unsigned int)fault,
+        (int)(target * 10.0f), (int)left, (int)right,
+        (unsigned int)lpwm, (unsigned int)rpwm,
+        (long)left_total, (long)right_total);
+    if (length <= 0 || length >= CAMERA_DIAGNOSTIC_SIZE)
+        return;
+    camera_tx_position = 0U;
+    __DMB();
+    camera_tx_length = (uint32_t)length;
+    LPUART_EnableInterrupts(LPUART1, kLPUART_TxDataRegEmptyInterruptEnable);
+}
+#endif
+
+#if SPEED_SCOPE_MODE
+// 逐飞助手 V2 虚拟示波器：4 通道浮点包，50 Hz。
+// 帧格式（默认，与本工程 #CAM 头一致）：0xAA | 和校验 | 0x10|通道数 | 包长 | float[4] 小端
+// 老版 zf_components 的顺序是 0xAA | 功能 | 校验 | 包长。示波器窗口一直为空时，
+// 把下面的 SCOPE_FUNC_AT_1 改为 1 再烧录一次即可验证。
+#ifndef SCOPE_FUNC_AT_1
+#define SCOPE_FUNC_AT_1 0
+#endif
+static void assistant_send_scope(uint32_t now)
+{
+    static uint32_t last_ms;
+    if ((uint32_t)(now - last_ms) < 20U || camera_tx_length != 0U)
+        return;
+    last_ms = now;
+
+    uint32_t primask = interrupt_global_disable();
+    float channel[4];
+#if SPEED_BENCH_MODE
+    channel[0] = speed_target;  // 通道1：目标速度（计数/10ms）
+    channel[1] = speed_real_l;  // 通道2：左轮实际
+    channel[2] = speed_real_r;  // 通道3：右轮实际
+    channel[3] = speed_pwm_l;   // 通道4：左轮 PWM
+#else
+    /* 赛道模式：TFT 硬件故障期间，把视觉链路搬到示波器上看。
+     * 通道1 横向偏差 ERR（偏右为正）/ 通道2 远端航向 HEAD /
+     * 通道3 舵机角度×10（870=中位）/ 通道4 目标速度（计数/10ms）。 */
+    channel[0] = (float)track_result.error;
+    channel[1] = (float)track_result.heading;
+    channel[2] = (float)track_servo_tenths;
+    channel[3] = speed_target;
+#endif
+    interrupt_global_enable(primask);
+
+    uint8_t packet[20];
+    uint8_t sum = 0U;
+    memset(packet, 0, sizeof(packet));
+    packet[0] = 0xAA;
+    packet[3] = (uint8_t)sizeof(packet);
+    memcpy(&packet[4], channel, sizeof(channel));
+#if SCOPE_FUNC_AT_1
+    packet[1] = (uint8_t)(0x10 | 4);
+    for (uint32_t i = 0U; i < sizeof(packet); ++i)
+        if (i != 2U) sum += packet[i];
+    packet[2] = sum;
+#else
+    packet[2] = (uint8_t)(0x10 | 4);
+    for (uint32_t i = 0U; i < sizeof(packet); ++i)
+        if (i != 1U) sum += packet[i];
+    packet[1] = sum;
+#endif
+
+    memcpy(camera_tx_packet, packet, sizeof(packet));
+    camera_tx_position = 0U;
+    __DMB();
+    camera_tx_length = (uint32_t)sizeof(packet);
+    LPUART_EnableInterrupts(LPUART1, kLPUART_TxDataRegEmptyInterruptEnable);
+}
+#endif
 
 static void screen_button_poll(uint32_t now)
 {
@@ -356,10 +454,10 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 134, motor_enabled ? "C13 SERVO ON  " : "C13 SERVO OFF ");
 #else
     const ring_control_state_t *ring_display=&screen_ring_snapshot;
-    track_path_observation_t display_path=track_result.ring.path[TRACK_PATH_NORMAL];
-    if(screen_approach_source!=TRACK_PATH_NORMAL) display_path=track_result.ring.approach_path;
+    track_path_observation_t display_path=screen_track_result.ring.path[TRACK_PATH_NORMAL];
+    if(screen_approach_source!=TRACK_PATH_NORMAL) display_path=screen_track_result.ring.approach_path;
     else if(screen_guide_id!=RING_GUIDE_NONE) {
-        const ring_corner_guide_t *g=&track_result.ring.corners.guide[screen_guide_id];
+        const ring_corner_guide_t *g=&screen_track_result.ring.corners.guide[screen_guide_id];
         display_path=(track_path_observation_t){g->error,g->heading,g->valid,g->confidence};
     }
     else if(ring_display->action_locked || screen_path_source=='?') display_path=ring_display->selected_path;
@@ -369,7 +467,7 @@ static void screen_draw_stats(void)
         (int)display_path.error,(int)display_path.heading);
     tft180_show_string(0, 102, line);
     snprintf(line, sizeof(line), "L%u R%u S%u G%u %c  ",
-        (unsigned int)track_result.ring.corners.count[0],(unsigned int)track_result.ring.corners.count[1],
+        (unsigned int)screen_track_result.ring.corners.count[0],(unsigned int)screen_track_result.ring.corners.count[1],
         (unsigned int)ring_display->corner_stage,(unsigned int)screen_guide_id,screen_path_source);
     tft180_show_string(0, 118, line);
     if (motor_feedback_fault)
@@ -446,15 +544,15 @@ static void screen_draw_track_overlay(void)
     uint8_t running=motor_enabled;
     interrupt_global_enable(primask);
     const ring_control_state_t *state=&screen_ring_snapshot;
-    const ring_corner_frame_t *corners=&track_result.ring.corners;
-    uint8_t same_frame=(uint8_t)(!RING_FEATURE_ENABLED || state->corner_frame_number==track_result.frame_number);
-    uint8_t approach_valid=(uint8_t)(track_result.ring.approach_path.valid &&
-        (track_result.ring.approach_source==TRACK_PATH_LEFT || track_result.ring.approach_source==TRACK_PATH_RIGHT));
+    const ring_corner_frame_t *corners=&screen_track_result.ring.corners;
+    uint8_t same_frame=(uint8_t)(!RING_FEATURE_ENABLED || state->corner_frame_number==screen_track_result.frame_number);
+    uint8_t approach_valid=(uint8_t)(screen_track_result.ring.approach_path.valid &&
+        (screen_track_result.ring.approach_source==TRACK_PATH_LEFT || screen_track_result.ring.approach_source==TRACK_PATH_RIGHT));
     screen_guide_id=RING_GUIDE_NONE;screen_path_preview=0U;screen_approach_source=TRACK_PATH_NORMAL;
     screen_path_source=state->fault ? '?' : 'N';
     if(!running && !state->fault) {
         if(approach_valid) {
-            screen_approach_source=track_result.ring.approach_source;
+            screen_approach_source=screen_track_result.ring.approach_source;
             screen_path_preview=1U;
         } else {
             screen_guide_id=screen_preview_guide(corners);
@@ -466,10 +564,10 @@ static void screen_draw_track_overlay(void)
     } else if(!state->fault && !same_frame) {
         screen_path_source='?';
     } else if(!state->fault && !state->action_locked && approach_valid &&
-              state->path_mode==track_result.ring.approach_source) {
-        screen_approach_source=track_result.ring.approach_source;
+              state->path_mode==screen_track_result.ring.approach_source) {
+        screen_approach_source=screen_track_result.ring.approach_source;
     } else if(!state->fault && state->line_active &&
-              state->corner_guide_frame_number==track_result.frame_number &&
+              state->corner_guide_frame_number==screen_track_result.frame_number &&
               state->corner_guide_id<RING_CORNER_GUIDE_COUNT &&
               corners->guide[state->corner_guide_id].valid) {
         screen_guide_id=state->corner_guide_id;
@@ -481,13 +579,13 @@ static void screen_draw_track_overlay(void)
         screen_path_source=screen_approach_source==TRACK_PATH_LEFT ? 'L' : 'R';
     for(unsigned row=MT9V03X_H*RING_SEARCH_START_PERCENT/100U;
         row<MT9V03X_H*RING_SEARCH_END_PERCENT/100U;++row) {
-        if(track_result.raw_flags[row]&1U) screen_point((float)track_result.raw_left[row],(float)row,RGB565_RED);
-        if(track_result.raw_flags[row]&2U) screen_point((float)track_result.raw_right[row],(float)row,RGB565_RED);
+        if(screen_track_result.raw_flags[row]&1U) screen_point((float)screen_track_result.raw_left[row],(float)row,RGB565_RED);
+        if(screen_track_result.raw_flags[row]&2U) screen_point((float)screen_track_result.raw_right[row],(float)row,RGB565_RED);
         /* The approach array belongs to this image; rejected rows stay gaps. */
-        if(screen_approach_source!=TRACK_PATH_NORMAL && track_result.approach_valid[row])
-            screen_point((float)track_result.approach_center[row],(float)row,RGB565_BLUE);
-        else if(screen_path_source=='N' && track_result.row_valid[row])
-            screen_point((float)track_result.center[row],(float)row,RGB565_BLUE);
+        if(screen_approach_source!=TRACK_PATH_NORMAL && screen_track_result.approach_valid[row])
+            screen_point((float)screen_track_result.approach_center[row],(float)row,RGB565_BLUE);
+        else if(screen_path_source=='N' && screen_track_result.row_valid[row])
+            screen_point((float)screen_track_result.center[row],(float)row,RGB565_BLUE);
     }
     for(unsigned side=0U;side<2U;++side) for(unsigned i=0U;i<corners->count[side] && i<RING_CORNER_MAX_PER_SIDE;++i) {
         const ring_corner_point_t *point=&corners->point[side][i];
@@ -567,10 +665,20 @@ int main(void)
     uint8_t displayed_speed_mode = speed_full_enabled;
     uint32_t last_status_ms = 0;
     uint32_t last_processed_frame = 0;
+    uint32_t last_display_ms = 0;
 
     while (1)
     {
         uint32_t now = timer_get(GPT_TIM_1);
+#if SPEED_BENCH_MODE
+#if SPEED_SCOPE_MODE
+        assistant_send_scope(now);
+#else
+        assistant_send_speed(now);
+#endif
+        // 架空调速不处理摄像头和屏幕，保持串口采样接近50ms。
+        continue;
+#endif
         screen_button_poll(now);
         update_frame_rates(now);
         if ((uint32_t)(now - last_status_ms) >= 100U)
@@ -633,7 +741,7 @@ int main(void)
                 }
             }
 #if CAMERA_SEND_RAW
-            if (screen_enabled)
+            if (screen_enabled && !SPEED_BENCH_MODE && !SPEED_SCOPE_MODE)
                 assistant_prepare_raw_image();
 #endif
             // 复用普通/环岛共同需要的地面范围，滤波也不跨越该范围边界。
@@ -664,21 +772,25 @@ int main(void)
                 ++invalid_vision_frames;
             track_frame_publish(&track_result);
 
-            if (screen_enabled)
+            uint32_t display_now = timer_get(GPT_TIM_1);
+            if (screen_enabled && (displayed_frames == 0U ||
+                (uint32_t)(display_now - last_display_ms) >= SCREEN_FRAME_PERIOD_MS))
             {
-                // 显示完整当前帧，不再按赛道关联关系清黑预览区域。
+                last_display_ms = display_now;
+                /* Drawing is slower than camera capture. Control receives
+                 * every processed frame; preview and text share one snapshot. */
+                screen_track_result = track_result;
                 tft180_displayimage03x((uint8_t *)image,
                                        TRACK_DISPLAY_WIDTH, TRACK_DISPLAY_HEIGHT);
                 screen_draw_track_overlay();
                 ++displayed_frames;
-                // 图像、边线与诊断全部读取刚完成的 track_result，禁止跨帧混看。
                 screen_stats_dirty = 1U;
                 screen_draw_stats();
             }
             ++processed_frames;
 
             // 发送已冻结的本帧灰度图，或按 CAMERA_SEND_RAW 配置发送处理图。
-            if (screen_enabled)
+            if (screen_enabled && !SPEED_BENCH_MODE && !SPEED_SCOPE_MODE)
                 assistant_send_image();
 
         }

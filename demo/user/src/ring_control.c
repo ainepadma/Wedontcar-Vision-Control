@@ -155,6 +155,21 @@ static uint8_t vote(ring_control_state_t *s,const ring_corner_frame_t *f,uint8_t
     s->corner_vote_frames=saturating_increment(s->corner_vote_frames);
     return (uint8_t)(s->corner_vote_frames>=RING_CORNER_CONFIRM_FRAMES);
 }
+/* A 270 mouth can lose one side of its corner pair for one processed frame.
+ * Preserve the existing vote without adding evidence; a second miss, stale
+ * frame, or conflicting pair still cancels it. */
+static void miss_270_vote(ring_control_state_t *s,const ring_corner_frame_t *f,
+                          uint8_t guide,uint8_t expected)
+{
+    if(s->corner_vote_guide==guide && s->corner_vote_frames && !s->corner_vote_misses &&
+       s->last_frame_ms-s->corner_vote_ms<=RING_VISION_STALE_MS &&
+       !ambiguous(f) && f->count[0]<=expected && f->count[1]<=expected &&
+       (f->count[0]==expected || f->count[1]==expected || pair_is(f,0U))) {
+        s->corner_vote_misses=1U;
+        return;
+    }
+    clear_vote(s);
+}
 static void select_guide(ring_control_state_t *s,const ring_corner_frame_t *f,uint8_t id,uint32_t now)
 {
     const ring_corner_guide_t *g=&f->guide[id];
@@ -290,7 +305,7 @@ static void observe_270(ring_control_state_t *s,const track_ring_observation_t *
             ++s->corner_stage;select_guide(s,f,RING_GUIDE_270_CONNECT,now);
             s->line_started_ms=now;s->line_started_counts=s->travel_counts;
             s->reset_tracking_history=1U;clear_vote(s);
-        } else if(!pair_is(f,2U)) clear_vote(s);
+        } else if(!pair_is(f,2U)) miss_270_vote(s,f,RING_GUIDE_270_CONNECT,2U);
         return;
     }
     if(s->corner_stage==2U || s->corner_stage==5U) {
@@ -311,7 +326,9 @@ static void observe_270(ring_control_state_t *s,const track_ring_observation_t *
             s->corner_event_travel=s->travel_counts;s->corner_event_yaw=s->yaw_progress_deg;
             set_phase(s,RING_STATE_EXITING,now);select_guide(s,f,RING_GUIDE_270_EXTEND,now);
             s->line_started_ms=now;s->line_started_counts=s->travel_counts;
-        } else if(!pair_is(f,1U) || !progress_since_event(s)) clear_vote(s);
+        } else if(!pair_is(f,1U) && progress_since_event(s))
+            miss_270_vote(s,f,RING_GUIDE_270_EXTEND,1U);
+        else if(!progress_since_event(s)) clear_vote(s);
     }
 }
 static void observe_360(ring_control_state_t *s,const track_ring_observation_t *v,uint32_t now)
@@ -324,7 +341,16 @@ static void observe_360(ring_control_state_t *s,const track_ring_observation_t *
         return;
     }
     uint8_t id=choose_360(s,&v->corners,(uint8_t)(s->corner_stage+1U));
-    if(id==RING_GUIDE_NONE) {clear_vote(s);return;}
+    if(id==RING_GUIDE_NONE) {
+        uint8_t expected=(uint8_t)(s->corner_stage==1U ? RING_GUIDE_B_BRANCH_LEFT :
+                                   (s->corner_stage==2U ? RING_GUIDE_A_LEFT : RING_GUIDE_B_MAIN_LEFT));
+        if(pair_is(&v->corners,0U) && s->corner_vote_frames && !s->corner_vote_misses &&
+           s->last_frame_ms-s->corner_vote_ms<=RING_VISION_STALE_MS &&
+           (s->corner_vote_guide==expected || s->corner_vote_guide==expected+1U))
+            s->corner_vote_misses=1U;
+        else clear_vote(s);
+        return;
+    }
     if(!vote(s,&v->corners,id)) return;
     ++s->corner_stage;
     if(s->corner_stage==2U) {s->entry_passed=1U;set_phase(s,RING_STATE_INSIDE,now);}
@@ -369,7 +395,9 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
     /* Do not reinterpret a brief one-sided occlusion of a bilateral candidate
      * as a 360 entry. This latch is evidence hysteresis, not an event timer. */
     if(s->type_vote==TRACK_RING_270 && s->miss_frames<RING_PREP_MISS_FRAMES) {
-        ++s->miss_frames;clear_vote(s);return;
+        ++s->miss_frames;
+        miss_270_vote(s,f,RING_GUIDE_270_EXTEND,1U);
+        return;
     }
     s->type_vote=TRACK_RING_UNKNOWN;
     uint8_t id=choose_360(s,f,1U);
@@ -436,11 +464,37 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
         select_guide(s,&v->corners,RING_GUIDE_270_EXTEND,s->last_frame_ms);
         s->line_active=1U;s->path_mode=TRACK_PATH_STRAIGHT;return s->selected_path;
     }
+    /* A newly visible 360 corner already has a current-frame branch guide.
+     * After two consistent votes use it for steering while the third vote
+     * confirms the event. This avoids using the old ordinary midpoint at the
+     * open mouth, without consuming the corner or changing the event order. */
+    if(s->kind==TRACK_RING_360 && s->corner_stage<4U && s->corner_vote_frames>=2U &&
+       !s->corner_vote_misses) {
+        uint8_t id=choose_360(s,&v->corners,(uint8_t)(s->corner_stage+1U));
+        if(id!=RING_GUIDE_NONE && id==s->corner_vote_guide) {
+            if(s->corner_guide_id!=id) {
+                s->line_started_ms=now;s->line_started_counts=s->travel_counts;
+                s->reset_tracking_history=1U;
+            }
+            select_guide(s,&v->corners,id,s->last_frame_ms);
+            s->line_active=1U;s->path_mode=TRACK_PATH_STRAIGHT;return s->selected_path;
+        }
+    }
     uint8_t normal_phase=(uint8_t)((s->kind==TRACK_RING_270 && s->corner_stage==3U) ||
                                   (s->kind==TRACK_RING_360 && s->corner_passed));
     /* A one-frame false clear cannot cancel a confirmed 360 boundary. Passage
      * already requires consecutive missing observations AND physical progress. */
-    if((normal_phase || (s->kind!=TRACK_RING_360 && clear_road(v))) && v->path[0].valid) {
+    /* During the 270 exit vote, keep the provisional boundary through one
+     * missing corner frame. Otherwise a single false clear swaps steering to
+     * the junction-biased ordinary midpoint and back on the next image. */
+    uint8_t provisional_270_miss=(uint8_t)(s->kind==TRACK_RING_270 && s->corner_stage==3U &&
+        s->corner_guide_id==RING_GUIDE_270_EXTEND && s->corner_have_guide &&
+        s->corner_vote_guide==RING_GUIDE_270_EXTEND && s->corner_vote_misses==1U);
+    uint8_t provisional_360_miss=(uint8_t)(s->kind==TRACK_RING_360 && s->corner_stage<4U &&
+        s->corner_have_guide && s->corner_guide_id==s->corner_vote_guide &&
+        s->corner_vote_frames>=2U && s->corner_vote_misses==1U);
+    if(!provisional_270_miss && !provisional_360_miss &&
+       (normal_phase || (s->kind!=TRACK_RING_360 && clear_road(v))) && v->path[0].valid) {
         if(s->kind==TRACK_RING_270 && s->corner_stage==3U) {
             if(s->line_active) s->reset_tracking_history=1U;
             s->corner_guide_id=RING_GUIDE_NONE;s->corner_have_guide=0U;

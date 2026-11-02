@@ -2,10 +2,10 @@
 #include <math.h>
 
 // 10ms 位置式 PI：小幅积分补偿持续负载，停止/故障时清除历史。
-// imax 是积分状态限幅；Ki=0.2 时积分最多贡献 1000。
-// 电机总输出硬限制为满量程20%；无反馈保护见 PIT 中断。
-float speed_KP = 50.0f, speed_KI = 0.2f, speed_KD = 0.0f;
-float speed_IMAX = 5000.0f, speed_OUTMAX = 2000.0f;
+// imax 是积分状态限幅；Ki=0.3 时积分最多贡献 3600。
+// 电机总输出硬限制为满量程70%；无反馈保护见 PIT 中断。
+float speed_KP = 25.0f, speed_KI = 0.3f, speed_KD = 0.0f;
+float speed_IMAX = 12000.0f, speed_OUTMAX = 7000.0f;
 volatile float speed_target = 0.0f;
 volatile float speed_real_l = 0.0f, speed_real_r = 0.0f;
 volatile float speed_pwm_l = 0.0f, speed_pwm_r = 0.0f;

@@ -40,6 +40,7 @@ static void verify(const uint8_t *image, uint16_t rows, uint16_t cols,
     CHECK(guarded->after == UINT64_C(0x8877665544332211));
     CHECK(image_checksum(image, count) == checksum);
     CHECK(guarded->result.confidence <= 100U);
+    CHECK(guarded->result.edge_rescue <= 1U);
     CHECK(guarded->result.roi_rows ==
           (uint32_t)rows * TRACK_VISION_ROI_END_PERCENT / 100U -
           (uint32_t)rows * TRACK_VISION_ROI_START_PERCENT / 100U);
@@ -223,12 +224,72 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && abs(result->error) <= 10);
 
-    // Missing far/near thirds invalidate output even if 2/3 of ROI remains.
+    // A tight bend may leave the far third: a connected near road reaching the
+    // bottom remains steerable from its own near-center geometry.
     draw_lane(image, rows, cols, 0, 0);
     memset(image + (uint32_t)roi_start * cols, 0, (size_t)zone_rows * cols);
     verify(image, rows, cols, &guarded);
-    CHECK(!result->valid);
+    CHECK(result->valid && result->far_valid_rows == 0U);
+    CHECK(result->near_geometry_valid && result->bottom_valid);
+    CHECK(result->error == result->near_error && result->heading == result->near_heading);
+    // Only the near third remains in view: keep its connected bottom path
+    // even though global coverage is below the ordinary 45% threshold.
+    draw_lane(image, rows, cols, -(int32_t)cols / 8, 0);
+    memset(image + (uint32_t)roi_start * cols, 0,
+           (size_t)(roi_end - zone_rows - roi_start) * cols);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->near_geometry_valid && result->bottom_valid);
+    CHECK(result->far_valid_rows == 0U && result->confidence >= 80U);
+    CHECK(result->error < -100 && result->reject_flags == TRACK_VISION_REJECT_NONE);
+    CHECK(result->near_only && !result->edge_rescue);
+    track_ring_vision_state_t near_ring;
+    track_ring_vision_init(&near_ring);
+    track_ring_vision_process(&near_ring, image, rows, cols, result);
+    CHECK(result->ring.path[TRACK_PATH_NORMAL].valid);
+    CHECK(result->ring.type_hint == TRACK_RING_UNKNOWN);
+    CHECK(result->ring.corners.count[0] == 0U && result->ring.corners.count[1] == 0U);
+    // The connected middle third previews a bend that the bottom third has
+    // not reached; never use an unrelated far-third white component for it.
+    draw_lane(image, rows, cols, 0, 0);
+    memset(image + (uint32_t)roi_start * cols, 0, (size_t)zone_rows * cols);
+    const uint16_t middle_start = roi_start + zone_rows;
+    const uint16_t near_start = roi_end - zone_rows;
+    const uint16_t lane_width = cols / 3U;
+    for (uint16_t y = middle_start; y < near_start; ++y) {
+        int32_t shift = -(int32_t)(near_start - y) * cols /
+                         (int32_t)(8U * (near_start - middle_start));
+        uint16_t left = (uint16_t)(((int32_t)cols - lane_width) / 2 + shift);
+        memset(image + (uint32_t)y * cols, 0, cols);
+        memset(image + (uint32_t)y * cols + left, 255, lane_width);
+    }
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && !result->edge_rescue && result->far_valid_rows == 0U);
+    CHECK(abs(result->near_error) < 20 && result->heading <= -60);
+    CHECK(result->near_heading <= -180);
+    // A clean far section just below the normal coverage threshold must not
+    // alternate between TRACK=1 and TRACK=0 from a one-row camera change.
+    draw_lane(image, rows, cols, 0, 0);
+    memset(image + (uint32_t)roi_start * cols, 0,
+           (size_t)(zone_rows * 3U / 5U) * cols);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->far_valid_rows < zone_rows * 45U / 100U);
+    CHECK(result->far_valid_rows >= zone_rows * 30U / 100U);
+    CHECK(result->reject_flags == TRACK_VISION_REJECT_NONE);
+    CHECK(!result->near_only && !result->edge_rescue);
+    // An unrelated distant road cannot replace the confirmed near route.
+    draw_lane(image, rows, cols, 0, 0);
+    memset(image + (uint32_t)roi_start * cols, 0, (size_t)zone_rows * cols);
+    for (uint16_t y = roi_start; y < roi_start + zone_rows; ++y)
+        memset(image + (uint32_t)y * cols + cols / 16U, 255, cols / 10U);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->far_valid_rows == 0U);
+    CHECK(result->error == result->near_error);
+    // The fallback must still reject a lane floating above the car.
+    memset(image + (uint32_t)(roi_end - 5U) * cols, 0, (size_t)5U * cols);
+    verify(image, rows, cols, &guarded);
+    CHECK(!result->valid && !result->bottom_valid);
     CHECK((result->reject_flags & TRACK_VISION_REJECT_FAR_COVERAGE) != 0U);
+    // Missing the near third is never a valid ego road.
     draw_lane(image, rows, cols, 0, 0);
     memset(image + (uint32_t)(roi_end - zone_rows) * cols, 0, (size_t)zone_rows * cols);
     verify(image, rows, cols, &guarded);
@@ -252,7 +313,8 @@ static void test_resolution(uint16_t rows, uint16_t cols)
     memset(image + (uint32_t)missing_row * cols, 0, cols);
     verify(image, rows, cols, &guarded);
     CHECK(result->valid && result->row_valid[missing_row] == 0U);
-    CHECK(result->valid_rows == roi_rows - 1U);
+    CHECK(result->far_valid_rows == 0U);
+    CHECK(result->valid_rows < roi_rows - 1U);
 
     // Abruptly displaced far section must not be reacquired as the same track.
     draw_lane(image, rows, cols, 0, 0);
@@ -262,9 +324,57 @@ static void test_resolution(uint16_t rows, uint16_t cols)
         memset(image + (uint32_t)y * cols + cols * 3U / 4U, 255, cols / 6U);
     }
     verify(image, rows, cols, &guarded);
-    CHECK(!result->valid);
+    CHECK(result->valid && result->far_valid_rows == 0U);
+    CHECK(result->error == result->near_error);
     for (uint16_t y = roi_start; y < roi_start + zone_rows; ++y)
         CHECK(result->row_valid[y] == 0U);
+
+    // A near road clipped by one image edge can steer a sharp turn even when
+    // a disconnected distant road is visible. Two edge bands stay ambiguous.
+    memset(image, 0, count);
+    for (uint16_t y = roi_end - zone_rows; y < roi_end; ++y)
+        memset(image + (uint32_t)y * cols, 255,
+               cols / 2U + (uint32_t)(y - (roi_end - zone_rows)) * cols / (zone_rows * 8U));
+    for (uint16_t y = roi_start; y < roi_start + zone_rows; ++y)
+        memset(image + (uint32_t)y * cols + cols * 3U / 4U, 255, cols / 6U);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->edge_rescue && result->error < -180 && result->error > -400);
+    CHECK(result->far_valid_rows == 0U && result->near_valid_rows == 0U);
+    memset(image, 0, count);
+    for (uint16_t y = roi_end - zone_rows; y < roi_end; ++y)
+        memset(image + (uint32_t)y * cols + cols / 2U, 255, cols - cols / 2U);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->edge_rescue && result->error > 180 && result->error < 400);
+    memset(image, 0, count);
+    for (uint16_t y = roi_end - zone_rows; y < roi_end; ++y) {
+        memset(image + (uint32_t)y * cols, 255, cols / 4U);
+        memset(image + (uint32_t)y * cols + cols * 3U / 4U, 255, cols - cols * 3U / 4U);
+    }
+    verify(image, rows, cols, &guarded);
+    CHECK(!result->valid && !result->edge_rescue);
+    memset(image, 0, count);
+    for (uint16_t y = roi_end - zone_rows; y < roi_end - 8U; ++y)
+        memset(image + (uint32_t)y * cols, 255, cols / 2U);
+    verify(image, rows, cols, &guarded);
+    CHECK(!result->valid && !result->edge_rescue);
+
+    // The captured hard bend has a one-sided near edge but its final 8-10
+    // scanlines are damaged. A matching partial far edge distinguishes this
+    // from an isolated cropped white patch; a longer gap still rejects.
+    memset(image, 0, count);
+    for (uint16_t y = roi_end - zone_rows; y < roi_end - 10U; ++y)
+        memset(image + (uint32_t)y * cols, 255, cols / 2U);
+    for (uint16_t y = roi_start; y < roi_start + zone_rows / 4U; ++y)
+        memset(image + (uint32_t)y * cols, 255, cols / 3U);
+    verify(image, rows, cols, &guarded);
+    CHECK(result->valid && result->edge_rescue && result->error < 0);
+    memset(image, 0, count);
+    for (uint16_t y = roi_end - zone_rows; y < roi_end - 16U; ++y)
+        memset(image + (uint32_t)y * cols, 255, cols / 2U);
+    for (uint16_t y = roi_start; y < roi_start + zone_rows / 4U; ++y)
+        memset(image + (uint32_t)y * cols, 255, cols / 3U);
+    verify(image, rows, cols, &guarded);
+    CHECK(!result->valid && !result->edge_rescue);
 
     // Partial boundary and overly wide white region are both rejected.
     memset(image, 0, count);

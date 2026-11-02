@@ -91,8 +91,27 @@ static void illumination_and_islands(void)
     CHECK(supported==4U);
     puts("PASS smooth left/right illumination and mirror, noisy-white minority black class, 34x4 real island");
 }
+static void bright_near_band(void)
+{
+    image_track_preprocess_state_t state={0};
+    /* The lower camera rows can brighten independently of the middle bend.
+     * A global threshold then paints the near blue floor white and loses the
+     * bottom-connected lane. Both bands still have real local contrast. */
+    for (unsigned y=0;y<240U;++y) {
+        uint8_t dark=(uint8_t)(y>=160U ? 60U : 10U);
+        uint8_t light=(uint8_t)(y>=160U ? 76U : 36U);
+        memset(pixels+y*376U,dark,376U);
+        memset(pixels+y*376U+70U,light,236U);
+    }
+    CHECK(image_track_preprocess_stable(pixels,240,376,0,240,scratch,sizeof(scratch),
+                                        histogram,&(uint8_t){0},&state,1000U));
+    CHECK(pixels[200U*376U+20U]==0U && pixels[200U*376U+180U]==255U);
+    track_vision_process(pixels,240,376,&result);
+    CHECK(result.valid && result.near_valid_rows>60U && result.bottom_valid);
+    puts("PASS bright near-field band retains the bottom-connected lane");
+}
 int main(void)
 {
-    temporal();holes();illumination_and_islands();
+    temporal();holes();illumination_and_islands();bright_near_band();
     puts("All stability/illumination tests passed; no hardware accessed.");return 0;
 }

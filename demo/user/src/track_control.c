@@ -10,7 +10,10 @@
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
 /* 远处走向的前瞻权重：降低航向影响，几何识别范围保持不变。 */
 #define TRACK_HEADING_WEIGHT 1.00
-#define TRACK_APPROACH_HEADING_WEIGHT 0.25
+/* 只影响“弯还没到近处”这个阶段：近处一旦出现弯（aligned=1），
+ * heading_weight 会升到 TRACK_HEADING_WEIGHT，弯中转向强度不受这里影响。
+ * 0.55 时入弯偏早，降到 0.35 把前瞻压下来；仍偏早就再降，弯中拐不动请调 KP 而不是这里。 */
+#define TRACK_APPROACH_HEADING_WEIGHT 0.35
 #define TRACK_NEAR_BEND_START 30.0
 #define TRACK_NEAR_BEND_FULL 120.0
 #define TRACK_BEND_P_BOOST 0.40
@@ -324,8 +327,13 @@ track_control_output_t track_control_tick(track_control_state_t *state,
             double desired = cfg->servo_center +
                              (endpoint >= cfg->servo_center ? offset : -offset);
             double max_step = (double)cfg->max_servo_rate_deg_s * elapsed / 1000.0;
+            /* 弯道降速的提前量：分母越小，同样的航向越早把速度压到弯道目标。
+             * 原来 500 要 heading 到 500 才降满，实车到弯口已经来不及；380 提前约 25%。
+             * 注意减速没有主动制动，只靠滑行，所以这个提前量只能补偿一部分。 */
             double severity = fmax(fabs((double)state->filtered_error) / 600.0,
-                                   fabs((double)state->filtered_heading) / 500.0);
+                                   fabs((double)state->filtered_heading) / 380.0);
+            if (state->near_geometry_valid)
+                severity = fmax(severity, fabs(local_heading) / 120.0);
             severity = fmax(severity, span > 0.0 ? offset / span : 0.0);
             severity = track_clamp(severity, 0.0, 1.0);
             state->servo_angle = (float)track_clamp(desired,
