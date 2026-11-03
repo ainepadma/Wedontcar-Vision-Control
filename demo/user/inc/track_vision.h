@@ -132,19 +132,22 @@ typedef struct track_vision_result_t
     int16_t heading;
     int16_t near_error, near_heading;
     uint8_t near_geometry_valid;
+    uint8_t edge_rescue; /* Near single-edge turn; ring geometry is suppressed. */
+    uint8_t near_only; /* Connected near two-edge bend; no far ring evidence. */
     int16_t bottom_error;
     uint8_t bottom_valid;
 } track_vision_result_t;
 
 /*
  * 白轨黑底二值图，非零像素视为白色，输入图像不会被修改。
- * 仅跟踪 [40%H, 68%H) 行，排除底部固定车体区域，从近到远选择相连白色区域。
- * 保守限制：仅补偿不超过 2 像素的黑缝；白色宽度须在约 6.25%W
- * 至 80%W 之间。弯道近端若仅有一侧边界出画，且同帧完整赛道足以
- * 估计路宽、可见边界逐行连续，则补算该侧的中线；无依据的单边出画、
- * 全白、窄亮点以及无法确定唯一连续分支的行仍拒绝。不能代替岔路决策。
- * 有效行总比例、近端 1/3 和远端 1/3 各自的比例均须达到 45%。
- * confidence 为 ROI 有效行百分比；整体无效时 error/heading 均为零。
+ * 使用 vision_geometry.h 定义的 ROI，从近到远选择相连白色区域。
+ * 普通路径要求双边界及足够的整体/近端/远端覆盖；远端出画的急弯
+ * 可以由连续且触及底部的近端双边界控制，即使整体覆盖不足45%。
+ * 若近端只剩画面一侧的连续白轨，
+ * 且另一侧与远端同侧白块均不足以造成歧义，则 edge_rescue 使用
+ * 近端单边方向给出低速急弯指令，不用于环岛判定。
+ * 普通路径 confidence 是 ROI 有效行比例；edge_rescue 是近端单边
+ * 连续覆盖率。整体无效时 error/heading 均为零。
  * reject_flags、近/远有效行和行级拒绝计数均属于本次调用，便于把诊断
  * 与同一帧图像绑定；frame_number 由采集方在处理完成后填写。
  * near/far_width 为对应 1/3 区域的平均白轨宽度；ring_candidate 仅表示

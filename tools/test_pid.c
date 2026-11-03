@@ -49,16 +49,16 @@ static void test_power_on_and_independent_wheels(void)
     My_Pid_Init();
     CHECK(SPEED_CONTROL_PERIOD_MS == 10U);
     near_value(speed_target, 0.0f);
-    near_value(speed_pid_l.kp, 50.0f);
-    near_value(speed_pid_r.kp, 50.0f);
-    near_value(speed_pid_l.ki, 0.2f);
-    near_value(speed_pid_r.ki, 0.2f);
+    near_value(speed_pid_l.kp, 25.0f);
+    near_value(speed_pid_r.kp, 25.0f);
+    near_value(speed_pid_l.ki, 0.3f);
+    near_value(speed_pid_r.ki, 0.3f);
     near_value(speed_pid_l.kd, 0.0f);
     near_value(speed_pid_r.kd, 0.0f);
-    near_value(speed_pid_l.imax, 5000.0f);
-    near_value(speed_pid_r.imax, 5000.0f);
+    near_value(speed_pid_l.imax, 12000.0f);
+    near_value(speed_pid_r.imax, 12000.0f);
     near_value(speed_pid_l.outmin, 0.0f);
-    near_value(speed_pid_r.outmax, 2000.0f);
+    near_value(speed_pid_r.outmax, 7000.0f);
     near_value(speed_real_l, 0.0f);
     near_value(speed_real_r, 0.0f);
     near_value(speed_pwm_l, 0.0f);
@@ -132,15 +132,15 @@ static void test_p_only_matches_existing_drive(void)
     int error;
     My_Pid_Init();
     pid = speed_pid_l;
-    pid.ki = 0.0f; /* Preserve the former P-only law as an explicit algorithm regression. */
+    pid.ki = 0.0f; /* Verify the production output limit and P-only behavior. */
     for (error = -200; error <= 200; ++error)
     {
-        float expected = constrain_float(50.0f * (float)error, 0.0f, 2000.0f);
+        float expected = constrain_float(25.0f * (float)error, 0.0f, 7000.0f);
         near_value(PidLocCtrl(&pid, (float)error, 1.0f), expected);
         near_value(pid.integrator, 0.0f);
     }
     pid.integrator = 123.0f;
-    near_value(PidLocCtrl(&pid, 2.0f, 1.0f), 100.0f);
+    near_value(PidLocCtrl(&pid, 2.0f, 1.0f), 50.0f);
     near_value(pid.integrator, 0.0f);
     pid.ki = 1.0f;
     near_value(PidLocCtrl(&pid, 0.0f, 1.0f), 0.0f);
@@ -152,51 +152,51 @@ static void test_production_traction_pi(void)
     float previous_output;
     My_Pid_Init();
     /* Use the real production initializer, not test-only substitute gains.
-     * Straight/curve targets are 120/80 counts per 10-ms sample. */
-    near_value(speed_pid_l.kp, 50.0f);
-    near_value(speed_pid_l.ki, 0.2f);
+     * Verify the tuned production gains and conditional integration. */
+    near_value(speed_pid_l.kp, 25.0f);
+    near_value(speed_pid_l.ki, 0.3f);
     near_value(speed_pid_l.kd, 0.0f);
-    near_value(speed_pid_l.imax, 5000.0f);
+    near_value(speed_pid_l.imax, 12000.0f);
     near_value(speed_pid_l.outmin, 0.0f);
-    near_value(speed_pid_l.outmax, 2000.0f);
-    near_value(PidLocCtrl(&speed_pid_l, 120.0f, 1.0f), 2000.0f);
-    near_value(PidLocCtrl(&speed_pid_r, 80.0f, 1.0f), 2000.0f);
+    near_value(speed_pid_l.outmax, 7000.0f);
+    near_value(PidLocCtrl(&speed_pid_l, 300.0f, 1.0f), 7000.0f);
+    near_value(PidLocCtrl(&speed_pid_r, 300.0f, 1.0f), 7000.0f);
     near_value(speed_pid_l.integrator, 0.0f);
     near_value(speed_pid_r.integrator, 0.0f);
-    near_value(PidLocCtrl(&speed_pid_l, 2.0f, 1.0f), 100.4f);
-    near_value(speed_pid_r.out, 2000.0f);
+    near_value(PidLocCtrl(&speed_pid_l, 2.0f, 1.0f), 50.6f);
+    near_value(speed_pid_r.out, 7000.0f);
     near_value(speed_pid_r.integrator, 0.0f);
     Pid_Reset(&speed_pid_l);
     reset_state_is_zero(&speed_pid_l);
-    near_value(speed_pid_l.ki, 0.2f);
-    near_value(speed_pid_r.out, 2000.0f);
+    near_value(speed_pid_l.ki, 0.3f);
+    near_value(speed_pid_r.out, 7000.0f);
 
     /* A small sustained tracking error builds bounded load compensation. */
     previous_output = 0.0f;
-    for (iteration = 0U; iteration < 3000U; ++iteration)
+    for (iteration = 0U; iteration < 7000U; ++iteration)
     {
         float output = PidLocCtrl(&speed_pid_l, 2.0f, 1.0f);
         CHECK(isfinite(output));
         CHECK(output >= previous_output);
-        CHECK(output <= 1100.0f);
-        CHECK(speed_pid_l.integrator <= 5000.0f);
-        CHECK(speed_pid_l.out_i <= 1000.0f);
+        CHECK(output <= 3650.01f);
+        CHECK(speed_pid_l.integrator <= 12000.0f);
+        CHECK(speed_pid_l.out_i <= 3600.01f);
         previous_output = output;
     }
-    near_value(speed_pid_l.integrator, 5000.0f);
-    near_value(speed_pid_l.out_i, 1000.0f);
-    near_value(speed_pid_l.out, 1100.0f);
+    near_value(speed_pid_l.integrator, 12000.0f);
+    near_value(speed_pid_l.out_i, 3600.0f);
+    near_value(speed_pid_l.out, 3650.0f);
     /* Reaching target keeps the accumulated load compensation, unlike P-only. */
-    near_value(PidLocCtrl(&speed_pid_l, 0.0f, 1.0f), 1000.0f);
+    near_value(PidLocCtrl(&speed_pid_l, 0.0f, 1.0f), 3600.0f);
     /* Overspeed reduces PWM immediately, with no permanent minimum-PWM floor. */
-    near_value(PidLocCtrl(&speed_pid_l, -10.0f, 1.0f), 498.0f);
-    near_value(PidLocCtrl(&speed_pid_l, -30.0f, 1.0f), 0.0f);
+    near_value(PidLocCtrl(&speed_pid_l, -10.0f, 1.0f), 3347.0f);
+    near_value(PidLocCtrl(&speed_pid_l, -30.0f, 1.0f), 2838.0f);
     Pid_Reset(&speed_pid_l);
     reset_state_is_zero(&speed_pid_l);
-    near_value(speed_pid_l.kp, 50.0f);
-    near_value(speed_pid_l.ki, 0.2f);
+    near_value(speed_pid_l.kp, 25.0f);
+    near_value(speed_pid_l.ki, 0.3f);
     near_value(PidLocCtrl(&speed_pid_l, 0.0f, 1.0f), 0.0f);
-    near_value(speed_pid_r.out, 2000.0f);
+    near_value(speed_pid_r.out, 7000.0f);
 }
 
 static void test_large_pure_integral_step_reaches_boundary(void)

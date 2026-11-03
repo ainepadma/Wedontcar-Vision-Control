@@ -82,6 +82,7 @@ static void test_270(void)
     paired(1U);frame.path[0].valid=0U;(void)feed();
     assert(state.corner_stage==3U && !state.exit_seen && state.line_active && state.selected_path.valid);
     assert(state.corner_guide_frame_number==state.corner_frame_number);
+    clear();(void)feed();assert(state.corner_stage==3U && state.line_active && state.corner_guide_held);
     clear();(void)feed();assert(state.corner_stage==3U && !state.line_active);
     assert(state.corner_guide_id==RING_GUIDE_NONE && !state.corner_have_guide);
     paired(1U);repeat(3U);assert(state.corner_stage==4U && state.exit_seen);
@@ -93,6 +94,38 @@ static void test_270(void)
     repeat(10U);assert(state.phase==RING_STATE_IDLE);
     paired(1U);repeat(3U);assert(state.action_locked && state.kind==TRACK_RING_270);
 }
+static void test_270_single_frame_dropout(void)
+{
+    setup();
+    paired(1U);(void)feed();
+    fresh_frame();frame.corners.count[0]=1U;(void)feed();
+    assert(!state.action_locked && state.corner_vote_frames==1U && state.corner_vote_misses==1U);
+    paired(1U);repeat(2U);
+    assert(state.corner_stage==1U && state.action_locked);
+
+    paired(2U);(void)feed();
+    paired(2U);frame.corners.count[1]=1U;(void)feed();
+    assert(state.corner_stage==1U && state.corner_vote_frames==1U && state.corner_vote_misses==1U);
+    paired(2U);repeat(2U);assert(state.corner_stage==2U);
+    clear();repeat(3U);assert(state.corner_stage==3U);
+
+    paired(1U);track_path_observation_t p=feed();
+    assert(p.valid && p.error==35 && state.corner_stage==3U);
+    clear();frame.path[0].error=-200;p=feed();
+    assert(p.valid && p.error==35 && state.corner_guide_held && state.corner_vote_misses==1U);
+    paired(1U);repeat(2U);
+    assert(state.corner_stage==4U && state.selected_path.error==35);
+
+    paired(2U);(void)feed();
+    paired(2U);frame.corners.count[0]=1U;(void)feed();
+    paired(2U);repeat(2U);assert(state.corner_stage==5U);
+    clear();repeat(3U);assert(state.completed_270==1U);
+
+    /* Two misses cannot complete a corner vote or keep a provisional line. */
+    setup();paired(1U);(void)feed();clear();repeat(2U);
+    paired(1U);repeat(2U);assert(!state.action_locked);
+    (void)feed();assert(state.corner_stage==1U);
+}
 static void test_360(unsigned first_side)
 {
     setup();unsigned other=1U-first_side;int first_sign=first_side==0U ? -1 : 1;
@@ -103,7 +136,14 @@ static void test_360(unsigned first_side)
     assert(state.selected_path.error==first_sign*120);
     repeat(10U);assert(state.corner_stage==1U); /* One corner, many frames. */
     corner(first_side,RING_CORNER_A,PASSED_Y);(void)feed();
-    corner(first_side,RING_CORNER_B,105.f);repeat(3U);
+    corner(first_side,RING_CORNER_B,105.f);(void)feed();
+    track_path_observation_t provisional=feed();
+    assert(state.corner_stage==1U && state.corner_vote_frames==2U);
+    assert(provisional.valid && provisional.error==first_sign*300);
+    clear();frame.path[0].error=-first_sign*300;
+    provisional=feed();
+    assert(provisional.valid && provisional.error==first_sign*300 && state.corner_guide_held);
+    corner(first_side,RING_CORNER_B,105.f);(void)feed();
     assert(state.corner_stage==2U && state.corner_guide_id==RING_GUIDE_B_BRANCH_LEFT+first_side);
     assert(state.selected_path.error==first_sign*300);
     corner(other,RING_CORNER_A,(PASSED_Y - 17.f));repeat(3U);
@@ -241,7 +281,7 @@ static void test_a_dropout(unsigned side)
 int main(void)
 {
 #if RING_FEATURE_ENABLED
-    test_270();test_360(0U);test_360(1U);test_quantity_priority_and_order();
+    test_270();test_270_single_frame_dropout();test_360(0U);test_360(1U);test_quantity_priority_and_order();
     test_dedup_and_static_car();test_missing_stop_and_stale();test_transaction_and_timeout();
     test_a_dropout(0U);test_a_dropout(1U);
     puts("PASS corner ring control: quantities, A/B sequence, mirrors, dedup, handoff, stale and protection");
