@@ -4,9 +4,12 @@
 #include "track_control.h"
 #include "imu_navigation.h"
 #include "ring_control.h"
+#include "track_stop_diagnostics.h"
 
 // 临时端点标定模式已关闭；设为1时电机强制为零，C12/C15以0.5度调节舵机。
 #define SERVO_CENTER_TEST_MODE 0
+// 架空速度环调试固件：固定轮速目标，串口仅输出文字；赛道运行前改回0。
+#define SPEED_BENCH_MODE 0
 #define SERVO_CALIBRATION_MIN (70.0f)
 #define SERVO_CALIBRATION_MAX (110.0f)
 
@@ -14,10 +17,12 @@
 #define SCREEN_TOGGLE_KEY C12
 // C13 / KEY_3 控制两个驱动电机；上电默认停止，按住上电不会启动。
 #define MOTOR_TOGGLE_KEY C13
-// C14 / KEY_2 控制全部自动停车保护；默认关闭，C13手动停机和PWM硬限幅始终保留。
+// C14 / KEY_2 控制视觉/环岛自动停车；赛道版上电默认关闭，可按 C14 开启。
+// 编码器反号、无反馈和超速保护始终有效，C13手动停机和PWM硬限幅始终保留。
 #define PROTECTION_TOGGLE_KEY C14
 #define AUTOMATIC_PROTECTION_DEFAULT 0U
-// C15 / KEY_1 切换低速/全速；上电默认低速。
+// C15 / KEY_1 每按一次将普通档直道目标增加10.0f；重启恢复TRACK_SPEED_STRAIGHT。
+// 沿用旧宏名用于GPIO初始化；不再切换全速档，长按不连加。
 #define SPEED_MODE_TOGGLE_KEY C15
 extern volatile uint8_t motor_enabled;
 extern volatile uint8_t motor_feedback_fault; // 1=左、2=右、3=两侧；原因见 track_stop_reason
@@ -25,6 +30,8 @@ extern volatile uint8_t protection_enabled;
 extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
 extern volatile uint8_t track_stop_reason;
+extern volatile track_stop_snapshot_t track_last_stop;
+extern volatile int32_t encoder_total_l, encoder_total_r;
 extern volatile int16_t track_servo_tenths;
 extern imu_navigation_state_t imu_navigation;
 extern ring_control_state_t ring_control;
@@ -72,9 +79,12 @@ void track_frame_publish(const track_vision_result_t *result);
 
 // 速度目标位于 track_control.h，单位是编码器计数/10ms，不是 RPM 或 m/s。
 // 舵机左右端点仍使用本车原配置；必须架空验证方向和机械限位后才能落地。
-#define TRACK_STEER_KP 0.020f
+// 10-21 那版是 0.038，后来降到 0.020 导致弯道舵量只有 60% 左右；
+// 0.030 让典型弯道（ERR≈150、H≈400）打到接近满舵。直道若开始左右修就是偏大。
+#define TRACK_STEER_KP 0.030f
 #define TRACK_STEER_KD 0.0005f
-#define TRACK_SERVO_RATE_DEG_S 120.0f
+// 打满 11.5° 的耗时：120°/s 要 96ms，1.75m/s 下已跑出 17cm；180°/s 缩到 64ms。
+#define TRACK_SERVO_RATE_DEG_S 180.0f
 
 // 以下宏在初步测试例程时不可更改，后面若需更改舵机算法可以自行更改
 // ------------------ 舵机占空比计算方式 ------------------

@@ -1,528 +1,472 @@
 #include "ring_corner.h"
-#include "vision_geometry.h"
 #include <math.h>
-#include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
-/* All limits are geometric support limits, not 90-degree element classifiers.
- * A smooth edge occupies half of a sampling circle; a black convex vertex
- * occupies a smaller, contiguous sector at several radii. Sampling the original
- * image recovers both arms even when a row-run selector discarded a branch. */
-#define RC_MAX_ROWS 480U
-#define RC_MAX_COLS 752U
-#define RC_TOP_PERCENT VISION_SEARCH_START_PERCENT
-#define RC_END_PERCENT VISION_SEARCH_END_PERCENT
-#define RC_GUIDE_PERCENT VISION_TRACK_START_PERCENT
-#define RC_NEAR_PERCENT VISION_NEAR_START_PERCENT
-#define RC_DIRECTIONS 32U
-#define RC_POOL 24U
-#define RC_VERTEX_BUDGET 4096U
-/* Direction samples are quantized to 11.25 degrees. Treat an arm within about
- * 5.7 degrees of transverse as belonging to the expected forward/backward
- * half-plane; otherwise one physical tip flickers between A/B and NONE. */
-#define RC_DIRECTION_Y_TOLERANCE 0.10f
-
-typedef struct { float x,y; } rc_vec_t;
-typedef struct { ring_corner_point_t p; uint8_t side; } rc_candidate_t;
-static const rc_vec_t rc_direction[RC_DIRECTIONS]={
-    {1.f,0.f},{.9807853f,.1950903f},{.9238795f,.3826834f},{.8314696f,.5555702f},
-    {.7071068f,.7071068f},{.5555702f,.8314696f},{.3826834f,.9238795f},{.1950903f,.9807853f},
-    {0.f,1.f},{-.1950903f,.9807853f},{-.3826834f,.9238795f},{-.5555702f,.8314696f},
-    {-.7071068f,.7071068f},{-.8314696f,.5555702f},{-.9238795f,.3826834f},{-.9807853f,.1950903f},
-    {-1.f,0.f},{-.9807853f,-.1950903f},{-.9238795f,-.3826834f},{-.8314696f,-.5555702f},
-    {-.7071068f,-.7071068f},{-.5555702f,-.8314696f},{-.3826834f,-.9238795f},{-.1950903f,-.9807853f},
-    {0.f,-1.f},{.1950903f,-.9807853f},{.3826834f,-.9238795f},{.5555702f,-.8314696f},
-    {.7071068f,-.7071068f},{.8314696f,-.5555702f},{.9238795f,-.3826834f},{.9807853f,-.1950903f}
-};
-
-static float rc_clamp(float v,float lo,float hi) {return fmaxf(lo,fminf(hi,v));}
-static rc_vec_t rc_sub(rc_vec_t a,rc_vec_t b) {rc_vec_t r={a.x-b.x,a.y-b.y};return r;}
-static float rc_cross(rc_vec_t a,rc_vec_t b) {return a.x*b.y-a.y*b.x;}
-static float rc_length(rc_vec_t a) {return sqrtf(a.x*a.x+a.y*a.y);}
-static rc_vec_t rc_unit(rc_vec_t a)
+/* Port of E:/八邻域_v2.0: mirrored 8-neighbour black/white transitions,
+ * row borders, and slope/intercept gap filling. Coordinates and sums are
+ * widened for the native 304x154 sensor; source input is never painted. */
+#define LIMIT 2464U
+static uint16_t edge[2][LIMIT][2],length[2];
+static uint16_t b[2][480];
+static uint8_t flags[480];
+static const int8_t step[2][8][2]={
+ {{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1},{1,0},{1,1}},
+ {{0,1},{1,1},{1,0},{1,-1},{0,-1},{-1,-1},{-1,0},{-1,1}}};
+static float clamp(float x,float lo,float hi){return fmaxf(lo,fminf(x,hi));}
+static int white(const uint8_t *im,unsigned h,unsigned w,int x,int y)
 {
-    float n=rc_length(a);if(n>.001f) {a.x/=n;a.y/=n;}return a;
+    if(x<=0 || y<=0 || x>=(int)w-1 || y>=(int)h-1) return 0;
+    return im[(unsigned)y*w+(unsigned)x]!=0;
 }
-static uint8_t rc_white(const uint8_t *image,unsigned cols,int x,int y)
+unsigned ring_pdf_guide(unsigned stage,unsigned side)
+{return RING_GUIDE_PDF_BASE+(stage-1U)*2U+side;}
+static void trace(const uint8_t *im,unsigned h,unsigned w,unsigned side,int x,int y,ring_corner_frame_t *f)
 {
-    return (uint8_t)(image[(unsigned)y*cols+(unsigned)x]!=0U);
-}
-static uint8_t rc_black_vote(const uint8_t *image,unsigned cols,int x,int y)
-{
-    unsigned white=0U;
-    for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx)
-        white+=rc_white(image,cols,x+dx,y+dy);
-    return (uint8_t)(white<5U);
-}
-
-/* Return the two boundary rays of one contiguous black sector. */
-static uint8_t rc_sector(const uint8_t *image,unsigned cols,float x,float y,float radius,
-                         rc_vec_t ray[2],unsigned *sector_size)
-{
-    uint8_t black[RC_DIRECTIONS];unsigned count=0U,starts=0U,start=0U;
-    for(unsigned k=0U;k<RC_DIRECTIONS;++k) {
-        int px=(int)lroundf(x+radius*rc_direction[k].x);
-        int py=(int)lroundf(y+radius*rc_direction[k].y);
-        black[k]=rc_black_vote(image,cols,px,py);count+=black[k];
-    }
-    if(count<3U || count>14U) return 0U;
-    for(unsigned k=0U;k<RC_DIRECTIONS;++k)
-        if(black[k] && !black[(k+RC_DIRECTIONS-1U)%RC_DIRECTIONS]) {start=k;++starts;}
-    if(starts!=1U) return 0U;
-    unsigned last=(start+count-1U)%RC_DIRECTIONS;
-    rc_vec_t a=rc_direction[start],b=rc_direction[(start+RC_DIRECTIONS-1U)%RC_DIRECTIONS];
-    rc_vec_t c=rc_direction[last],d=rc_direction[(last+1U)%RC_DIRECTIONS];
-    a.x+=b.x;a.y+=b.y;c.x+=d.x;c.y+=d.y;
-    ray[0]=rc_unit(a);ray[1]=rc_unit(c);*sector_size=count;
-    return 1U;
-}
-
-static float rc_width(const ring_corner_context_t *ctx,unsigned cols,unsigned end,float y)
-{
-    float value=ctx->width_near+ctx->width_slope*(y-(float)(end-1U));
-    return rc_clamp(value,(float)cols*.10f,(float)cols*.75f);
-}
-static float rc_center(const ring_corner_context_t *ctx,unsigned cols,unsigned end,float y)
-{
-    float value=ctx->model_ready ? ctx->center_near+ctx->center_slope*(y-(float)(end-1U)) :
-        (float)(cols-1U)*.5f;
-    return rc_clamp(value,1.f,(float)cols-2.f);
-}
-
-static uint8_t rc_vertex(const uint8_t *image,unsigned cols,float x,float y,float radius,
-                         ring_corner_point_t *point,uint8_t tracked)
-{
-    rc_vec_t rays[3][2],arm[2],anchor[2];unsigned sizes[3];float residual=0.f;
-    for(unsigned k=0U;k<3U;++k)
-        if(!rc_sector(image,cols,x,y,radius*(float)(k+1U),rays[k],&sizes[k])) return 0U;
-    unsigned maximum=sizes[0],minimum=sizes[0];
-    for(unsigned k=1U;k<3U;++k) {if(sizes[k]>maximum) maximum=sizes[k];if(sizes[k]<minimum) minimum=sizes[k];}
-    /* Smooth circular arcs change sector aperture with radius; a junction tip
-     * retains two locally straight arms. Do not call every round island a tip. */
-    if(maximum-minimum>(tracked ? 3U : 2U)) return 0U;
-    for(unsigned side=0U;side<2U;++side) {
-        rc_vec_t first={x+radius*rays[0][side].x,y+radius*rays[0][side].y};
-        rc_vec_t middle={x+2.f*radius*rays[1][side].x,y+2.f*radius*rays[1][side].y};
-        rc_vec_t last={x+3.f*radius*rays[2][side].x,y+3.f*radius*rays[2][side].y};
-        arm[side]=rc_unit(rc_sub(last,first));anchor[side]=first;
-        float error=fabsf(rc_cross(rc_sub(middle,first),arm[side]));
-        if(error>radius*(tracked ? .35f : .25f)+.65f) return 0U;
-        residual+=error;
-    }
-    float den=rc_cross(arm[0],arm[1]);
-    if(fabsf(den)<.25f) return 0U;
-    float distance=rc_cross(rc_sub(anchor[1],anchor[0]),arm[1])/den;
-    rc_vec_t vertex={anchor[0].x+distance*arm[0].x,anchor[0].y+distance*arm[0].y};
-    rc_vec_t seed={x,y};float shift=rc_length(rc_sub(vertex,seed));
-    if(shift>radius*1.15f) return 0U;
-    /* Two tangents on a curved island intersect OUTSIDE its actual contour.
-     * A real sharp vertex must have a black support pixel at that intersection;
-     * do not accept a circle merely because its local arc looks convex. */
-    uint8_t vertex_black=0U;
-    int vx=(int)lroundf(vertex.x),vy=(int)lroundf(vertex.y);
-    for(int iy=vy-2;iy<=vy+2;++iy) for(int ix=vx-2;ix<=vx+2;++ix) {
-        float ex=(float)ix-vertex.x,ey=(float)iy-vertex.y;
-        if(ex*ex+ey*ey<=1.69f && !rc_white(image,cols,ix,iy)) vertex_black=1U;
-    }
-    if(!vertex_black) return 0U;
-    unsigned main=fabsf(arm[0].y)>=fabsf(arm[1].y) ? 0U : 1U,branch=1U-main;
-    if(fabsf(arm[main].y)<.65f) return 0U;
-    point->x=vertex.x;point->y=vertex.y;
-    point->main_dx=arm[main].x;point->main_dy=arm[main].y;
-    point->branch_dx=arm[branch].x;point->branch_dy=arm[branch].y;
-    /* Counts classify 270. A/B only classify directed forward/backward arms
-     * for 360. During approach the second arm evolves from oblique to nearly
-     * transverse, so a small quantization tolerance keeps one physical corner
-     * in the same A/B class without using 90 degrees to classify ring type. */
-    point->kind=RING_CORNER_NONE;
-    if(arm[main].y>.45f && arm[branch].y>-RC_DIRECTION_Y_TOLERANCE)
-        point->kind=RING_CORNER_A;
-    if(arm[main].y<-.45f && arm[branch].y<RC_DIRECTION_Y_TOLERANCE)
-        point->kind=RING_CORNER_B;
-    point->quality=(uint8_t)rc_clamp(98.f-residual*5.f-shift*1.5f,0.f,100.f);
-    return (uint8_t)(point->quality>=RING_CORNER_MIN_QUALITY);
-}
-
-/* This is association to the present ego road, not a count of every dark
- * connected component. The caller's flags come from near-seeded route_build.
- * Verify the whole short connection, not sparse samples that can jump across
- * a black separator into an unrelated white patch. Two-pixel seams match the
- * ordinary row-run tolerance; they are not new spatial route seeds. */
-static uint8_t rc_associated(const uint8_t *image,unsigned cols,unsigned end,
-                            const ring_corner_context_t *ctx,const ring_corner_point_t *p,
-                            float radius,uint8_t *side)
-{
-    float center=rc_center(ctx,cols,end,p->y);
-    int row=(int)lroundf(p->y);
-    if(ctx->flags==NULL || ctx->flags[row]==0U) return 0U;
-    if(ctx->flags!=NULL && ctx->left!=NULL && ctx->right!=NULL && (ctx->flags[row]&3U)==3U)
-        center=((float)ctx->left[row]+(float)ctx->right[row])*.5f;
-    float delta=center-p->x;
-    if(fabsf(delta)<radius*1.7f || fabsf(delta)>(float)cols*.48f) return 0U;
-    *side=(uint8_t)(delta<0.f);
-    unsigned good=0U,total=0U,black_run=0U;
-    int step=delta>0.f ? 1 : -1;
-    int stop=(int)lroundf(center),start=(int)lroundf(p->x)+2*step;
-    for(int px=start;step>0 ? px<=stop : px>=stop;px+=step) {
-        if(px<1 || px>=(int)cols-1) return 0U;
-        if(rc_white(image,cols,px,row)) {++good;black_run=0U;}
-        else if(++black_run>2U) return 0U;
-        ++total;
-    }
-    return (uint8_t)(total>0U && good*100U>=total*90U);
-}
-
-static void rc_add(rc_candidate_t pool[RC_POOL],unsigned *size,const ring_corner_point_t *point,
-                   uint8_t side,float radius,uint8_t *overflow)
-{
-    for(unsigned k=0U;k<*size;++k) {
-        float dx=pool[k].p.x-point->x,dy=pool[k].p.y-point->y;
-        if(pool[k].side==side && dx*dx+dy*dy<radius*radius*6.25f) {
-            if(point->quality>pool[k].p.quality) pool[k].p=*point;
-            return;
+    unsigned n=0;int px=-1,py=-1;
+    while(n<LIMIT && y>1) {
+        edge[side][n][0]=(uint16_t)x;edge[side][n][1]=(uint16_t)y;
+        if(f->border_index[side][y]==UINT16_MAX) f->border_index[side][y]=(uint16_t)n;
+        int nx=x,ny=y,best=(int)h+1;
+        for(unsigned k=0;k<8;++k) {
+            int ax=x+step[side][k][0],ay=y+step[side][k][1];
+            int bx=x+step[side][(k+1U)&7U][0],by=y+step[side][(k+1U)&7U][1];
+            if(ax<0 || ax>=(int)w || ay<1 || ay>=(int)h-1 || (ax==px && ay==py)) continue;
+            if(!white(im,h,w,ax,ay) && white(im,h,w,bx,by) && ay<best) {nx=ax;ny=ay;best=ay;}
         }
+        ++n;
+        if((nx==x && ny==y) || (n>8 && nx==edge[side][n-4][0] && ny==edge[side][n-4][1])) break;
+        px=x;py=y;x=nx;y=ny;
     }
-    if(*size>=RC_POOL) {*overflow=1U;return;}
-    pool[*size].p=*point;pool[*size].side=side;++*size;
+    length[side]=(uint16_t)n;
 }
-
-static uint8_t rc_line_x(const ring_corner_line_t *line,float y,float *x)
+static ring_corner_point_t point(float x,float y,unsigned kind)
 {
-    if(!line->valid || fabsf(line->y1-line->y0)<.5f ||
-       y<fminf(line->y0,line->y1)-.5f || y>fmaxf(line->y0,line->y1)+.5f) return 0U;
-    *x=line->x0+(y-line->y0)*(line->x1-line->x0)/(line->y1-line->y0);
-    return (uint8_t)isfinite(*x);
+    ring_corner_point_t p;memset(&p,0,sizeof(p));p.x=x;p.y=y;p.kind=(uint8_t)kind;p.quality=90;return p;
 }
-static ring_corner_line_t rc_ray(float x,float y,float dx,float dy,unsigned top,unsigned end,unsigned cols)
+static int valid(unsigned side,unsigned y){return (flags[y]&(1U<<side))!=0;}
+static void features(unsigned h,unsigned w,unsigned side,ring_corner_frame_t *f)
 {
-    ring_corner_line_t line={0};
-    if(fabsf(dy)<.12f || !isfinite(dx) || !isfinite(dy)) return line;
-    float limit=dy<0.f ? ((float)top-y)/dy : ((float)(end-1U)-y)/dy;
-    if(dx>0.f) limit=fminf(limit,((float)cols-2.f-x)/dx);
-    else if(dx<0.f) limit=fminf(limit,(1.f-x)/dx);
-    if(limit<3.f || y<(float)top || y>(float)(end-1U)) return line;
-    line.x0=x;line.y0=y;line.x1=x+limit*dx;line.y1=y+limit*dy;line.valid=1U;
-    return line;
-}
-
-static uint8_t rc_corridor_white(const uint8_t *image,unsigned cols,unsigned row,float left,float right)
-{
-    if(right-left<(float)cols/16.f) return 0U;
-    int start=(int)ceilf(fmaxf(0.f,left+2.f)),end=(int)floorf(fminf((float)(cols-1U),right-2.f));
-    unsigned white=0U,visible=0U,black_run=0U;
-    for(int x=start;x<=end;++x) {
-        if(rc_white(image,cols,x,(int)row)) {++white;black_run=0U;}
-        else if(++black_run>2U) return 0U;
-        ++visible;
-    }
-    int center=(int)lroundf((left+right)*.5f);
-    return (uint8_t)(center>=1 && center<(int)cols-1 && visible>=7U &&
-        (float)visible>=(right-left)*.55f &&
-        white*100U>=visible*90U && rc_white(image,cols,center,(int)row));
-}
-
-/* Beyond a B2 patch, continue along the observed branch arm. The ordinary row
- * selector can still prefer the main street, so pairing its edge with our new
- * branch would silently bring steering back to the wrong road. The line only
- * predicts WHERE to search: returned edges must be genuine binary transitions
- * belonging to the same white run, never more invented line pixels. */
-static uint8_t rc_real_arm(const uint8_t *image,unsigned cols,unsigned row,
-                           const ring_corner_line_t *line,unsigned side,float width,
-                           float *left,float *right,uint8_t *have_left,uint8_t *have_right)
-{
-    if(!line->valid || fabsf(line->y1-line->y0)<.5f) return 0U;
-    float expected=line->x0+((float)row-line->y0)*(line->x1-line->x0)/(line->y1-line->y0);
-    if(expected<1.f || expected>(float)(cols-2U)) return 0U;
-    float best=width*.20f+3.f;uint8_t found=0U;
-    for(unsigned cursor=0U;cursor<cols;) {
-        while(cursor<cols && !image[row*cols+cursor]) ++cursor;
-        if(cursor>=cols) break;
-        unsigned a=cursor,b=cursor;
-        while(cursor<cols && image[row*cols+cursor]) {b=cursor;++cursor;}
-        uint8_t reliable=(uint8_t)(side==0U ? a>1U : b<cols-2U);
-        if(!reliable || b-a<3U) continue;
-        float edge=side==0U ? (float)a : (float)b,error=fabsf(edge-expected);
-        if(error<best) {
-            best=error;*left=(float)a;*right=(float)b;
-            *have_left=(uint8_t)(a>1U);*have_right=(uint8_t)(b<cols-2U);found=1U;
+    unsigned q=0,good=0,total=0,near_good=0,jump=w/12U+2U,rad=h/20U+2U;
+    float sign=side ? -1.f : 1.f;
+    for(unsigned y=2;y+2<h;++y) {
+        if(valid(side,y)) ++q;
+        if(y>h*2U/3U && valid(side,y)) ++near_good;
+        if(y>h/5U && y+1<h && valid(side,y) && valid(side,y+1)) {
+            ++total;int d=(int)b[side][y]-(int)b[side][y+1];
+            /* Both monotonicity and bounded neighbour difference (PDF 1.2). */
+            if(abs(d)<=(int)(w/40U+2U) && sign*(float)d>=-2.f) ++good;
         }
-    }
-    return found;
-}
-
-/* Build steering from the finite repaired boundaries and actual other edge.
- * Width fallback is allowed only with a learned model and white support. */
-static float rc_finish(const uint8_t *image,unsigned rows,unsigned cols,
-                       const ring_corner_context_t *ctx,ring_corner_guide_t *guide)
-{
-    unsigned start=rows*RC_GUIDE_PERCENT/100U,end=rows*RC_END_PERCENT/100U;
-    unsigned span=end-start,zone=span/3U,valid=0U,near_count=0U,far_count=0U,gap=0U,repaired=0U;
-    unsigned branch_side=1U-guide->corner_side;
-    uint8_t branch=(uint8_t)(guide->corner_kind==RING_CORNER_B && guide->corner_side<2U &&
-        guide->boundary[branch_side].valid && !guide->boundary[guide->corner_side].valid);
-    uint8_t cropped_branch=0U;
-    float sum=0.f,weights=0.f,near_sum=0.f,far_sum=0.f,previous=0.f,cost=0.f;
-    float centers[RC_MAX_ROWS];uint8_t accepted[RC_MAX_ROWS];
-    memset(accepted,0,sizeof(accepted));
-    guide->valid=0U;guide->confidence=0U;guide->error=0;guide->heading=0;
-    guide->center_valid=0U;guide->center_link_valid=0U;memset(guide->center,0,sizeof(guide->center));
-    for(unsigned next=end;next>start;--next) {
-        unsigned row=next-1U;float left=0.f,right=0.f;
-        uint8_t have_left=rc_line_x(&guide->boundary[0],(float)row,&left);
-        uint8_t have_right=rc_line_x(&guide->boundary[1],(float)row,&right);
-        uint8_t uses_repair=(uint8_t)(have_left || have_right);
-        float width=rc_width(ctx,cols,end,(float)row);
-        uint8_t real_branch=0U;
-        if(branch && !uses_repair) {
-            if(ctx->flags==NULL || ctx->flags[row]==0U ||
-               !rc_real_arm(image,cols,row,&guide->boundary[branch_side],branch_side,width,
-                            &left,&right,&have_left,&have_right)) {++gap;continue;}
-            real_branch=1U;
-        }
-        if(!real_branch && !have_left && ctx->flags!=NULL && ctx->left!=NULL && (ctx->flags[row]&1U)) {
-            left=(float)ctx->left[row];have_left=1U;
-        }
-        if(!real_branch && !have_right && ctx->flags!=NULL && ctx->right!=NULL && (ctx->flags[row]&2U)) {
-            right=(float)ctx->right[row];have_right=1U;
-        }
-        if(ctx->model_ready && have_left!=have_right) {
-            if(have_left) {right=left+width;have_right=1U;}
-            else {left=right-width;have_left=1U;}
-        }
-        float center=(left+right)*.5f;
-        if(real_branch && valid>0U && have_left && have_right &&
-           ((left<0.f && center<(float)cols*.05f) ||
-            (right>(float)(cols-1U) && center>(float)cols*.95f))) cropped_branch=1U;
-        if(!have_left || !have_right || right-left>(float)cols*.80f ||
-           (ctx->model_ready && (right-left<width*.45f || right-left>width*1.8f)) ||
-           !rc_corridor_white(image,cols,row,left,right)) {++gap;continue;}
-        if(valid>0U && fabsf(center-previous)>width*.25f+3.f) {++gap;continue;}
-        if(valid>0U && gap>3U) break;
-        gap=0U;previous=center;centers[row]=center;accepted[row]=1U;
-        float weight=row>=end-zone ? 3.f : (row<start+zone ? 1.f : 2.f);
-        sum+=weight*center;weights+=weight;++valid;
-        if(uses_repair) ++repaired;
-        if(row>=end-zone) {near_sum+=center;++near_count;}
-        if(row<start+zone) {far_sum+=center;++far_count;}
-        cost+=fabsf(center-rc_center(ctx,cols,end,(float)row));
-    }
-    /* A correctly selected left/right branch may leave the camera before the
-     * ordinary fixed far band. Use only the already observed continuous path
-     * for heading, and only after an observed arm leads out of the image. A
-     * black gap or a missing corner is not permission to shorten lookahead. */
-    if(branch && cropped_branch && valid*100U>=span*55U && far_count*100U<zone*45U) {
-        unsigned first=start,last=end-1U;
-        while(first<end && !accepted[first]) ++first;
-        while(last>first && !accepted[last]) --last;
-        if(first<last) {
-            unsigned local_zone=(last-first+1U)/3U;
-            near_sum=0.f;far_sum=0.f;near_count=0U;far_count=0U;
-            for(unsigned row=first;row<=last;++row) if(accepted[row]) {
-                if(row>=last+1U-local_zone) {near_sum+=centers[row];++near_count;}
-                if(row<first+local_zone) {far_sum+=centers[row];++far_count;}
-            }
-            zone=local_zone;
-        }
-    }
-    if(valid*100U<span*55U || near_count*100U<zone*45U || far_count*100U<zone*45U ||
-       weights<1.f || repaired<3U || repaired*12U<span) return 1.e9f;
-    guide->error=(int16_t)lroundf(rc_clamp(sum/weights*2000.f/(float)(cols-1U)-1000.f,-1000.f,1000.f));
-    guide->heading=(int16_t)lroundf(rc_clamp((far_sum/(float)far_count-near_sum/(float)near_count)*
-                                           2000.f/(float)(cols-1U),-1000.f,1000.f));
-    guide->confidence=(uint8_t)(valid*100U/span);guide->valid=1U;
-    for(unsigned k=0U;k<RING_CORNER_CENTER_SAMPLES;++k) {
-        unsigned row=start+k*(end-1U-start)/(RING_CORNER_CENTER_SAMPLES-1U);
-        if(accepted[row]) {guide->center[k]=(uint16_t)lroundf(centers[row]);guide->center_valid|=(uint16_t)(1U<<k);}
-        if(k>0U) {
-            unsigned previous_row=start+(k-1U)*(end-1U-start)/(RING_CORNER_CENTER_SAMPLES-1U);
-            uint8_t connected=1U;
-            for(unsigned sample=previous_row;sample<=row;++sample) if(!accepted[sample]) connected=0U;
-            if(connected) guide->center_link_valid|=(uint16_t)(1U<<k);
-        }
-    }
-    return cost/(float)valid+(100.f-(float)guide->confidence);
-}
-
-static void rc_270(const uint8_t *image,unsigned rows,unsigned cols,const ring_corner_context_t *ctx,
-                    ring_corner_frame_t *out)
-{
-    unsigned top=rows*RC_TOP_PERCENT/100U,end=rows*RC_END_PERCENT/100U;
-    uint8_t count=out->count[0];
-    if(count!=out->count[1] || (count!=1U && count!=2U)) return;
-    unsigned index=count==1U ? RING_GUIDE_270_EXTEND : RING_GUIDE_270_CONNECT;
-    ring_corner_guide_t *guide=&out->guide[index];
-    for(unsigned side=0U;side<2U;++side) {
-        const ring_corner_point_t *near=&out->point[side][0];
-        if(count==1U) {
-            float sign=near->main_dy>0.f ? -1.f : 1.f;
-            guide->boundary[side]=rc_ray(near->x,near->y,sign*near->main_dx,sign*near->main_dy,top,end,cols);
-        } else {
-            const ring_corner_point_t *far=&out->point[side][1];
-            if(near->y-far->y<(float)rows*.025f) return;
-            guide->boundary[side]=(ring_corner_line_t){near->x,near->y,far->x,far->y,1U};
-        }
-    }
-    if(!guide->boundary[0].valid || !guide->boundary[1].valid) return;
-    guide->corner_side=0U;guide->corner_kind=out->point[0][0].kind;
-    guide->corner_x=out->point[0][0].x;guide->corner_y=fmaxf(out->point[0][0].y,out->point[1][0].y);
-    (void)rc_finish(image,rows,cols,ctx,guide);
-}
-
-static void rc_360(const uint8_t *image,unsigned rows,unsigned cols,const ring_corner_context_t *ctx,
-                    ring_corner_frame_t *out)
-{
-    unsigned top=rows*RC_TOP_PERCENT/100U,end=rows*RC_END_PERCENT/100U;
-    for(unsigned side=0U;side<2U;++side) {
-        if(out->count[side]>=RING_CORNER_MAX_PER_SIDE) continue;
-        for(unsigned k=0U;k<out->count[side];++k) {
-            const ring_corner_point_t *p=&out->point[side][k];
-            if(p->kind==RING_CORNER_NONE) continue;
-            unsigned policies=p->kind==RING_CORNER_A ? 1U : 2U;
-            for(unsigned policy=0U;policy<policies;++policy) {
-                float dx=p->main_dx,dy=p->main_dy;
-                unsigned index=RING_GUIDE_A_LEFT+side;
-                if(p->kind==RING_CORNER_B) {
-                    index=(policy==0U ? RING_GUIDE_B_BRANCH_LEFT : RING_GUIDE_B_MAIN_LEFT)+side;
-                    if(policy==0U) {dx=p->branch_dx;dy=p->branch_dy;}
-                }
-                ring_corner_line_t line=rc_ray(p->x,p->y,-dx,-dy,top,end,cols);
-                if(!line.valid) continue;
-                ring_corner_guide_t best={0};
-                /* A left-hand corner can produce the RIGHT boundary when its
-                 * branch arm is extended through the junction. Both adjacent
-                 * corridors may be white: nearest-center scoring alone would
-                 * choose the wrong branch. Preserve the selected arm's road
-                 * side, then reject rather than switch to the opposite route. */
-                unsigned boundary_side=(p->kind==RING_CORNER_B && policy==0U) ? 1U-side : side;
-                best.boundary[boundary_side]=line;best.corner_side=(uint8_t)side;best.corner_kind=p->kind;
-                best.corner_x=p->x;best.corner_y=p->y;
-                (void)rc_finish(image,rows,cols,ctx,&best);
-                /* Keep the nearest valid occurrence of each class; state-machine
-                 * event tracking prevents a persistent tip being consumed twice. */
-                if(best.valid && (!out->guide[index].valid || p->y>out->guide[index].corner_y)) out->guide[index]=best;
-            }
-        }
-    }
-}
-
-void ring_corner_process(const uint8_t *binary,uint16_t rows,uint16_t cols,
-                         const ring_corner_context_t *context,ring_corner_frame_t *out)
-{
-    if(out==NULL) return;
-    memset(out,0,sizeof(*out));out->rows=rows;out->cols=cols;
-    if(binary==NULL || context==NULL || rows<60U || rows>RC_MAX_ROWS || cols<64U || cols>RC_MAX_COLS) return;
-    if(context->model_ready && (!isfinite(context->width_near) || !isfinite(context->width_slope) ||
-       !isfinite(context->center_near) || !isfinite(context->center_slope) || context->width_near<1.f)) return;
-    unsigned top=(unsigned)rows*RC_TOP_PERCENT/100U,end=(unsigned)rows*RC_END_PERCENT/100U;
-    unsigned radius=rows/48U;if(radius<3U) radius=3U;
-    unsigned margin=radius*3U+2U;
-    if(end-top<=margin*2U || (unsigned)cols<=margin*2U) return;
-    out->detector_near_row=(uint16_t)(end-margin-1U);
-    rc_candidate_t pool[RC_POOL];unsigned size=0U,evaluations=0U;uint8_t overflow=0U;
-    for(unsigned row=top+margin;row+margin<end;++row) {
-        for(unsigned col=margin;col+margin<cols;++col) {
-            if(binary[row*(unsigned)cols+col] ||
-               (!binary[row*(unsigned)cols+col-1U] && !binary[row*(unsigned)cols+col+1U] &&
-                !binary[(row-1U)*(unsigned)cols+col] && !binary[(row+1U)*(unsigned)cols+col])) continue;
-            if(++evaluations>RC_VERTEX_BUDGET) {
-                out->count[0]=RING_CORNER_MAX_PER_SIDE;out->count[1]=RING_CORNER_MAX_PER_SIDE;return;
-            }
-            ring_corner_point_t p;uint8_t side;
-            if(!rc_vertex(binary,cols,(float)col,(float)row,(float)radius,&p,0U)) continue;
-            if(p.y<(float)(top+margin) || p.y>(float)(end-margin-1U) || p.x<(float)margin || p.x>(float)(cols-margin-1U)) continue;
-            if(!rc_associated(binary,cols,end,context,&p,(float)radius,&side)) continue;
-            rc_add(pool,&size,&p,side,(float)radius,&overflow);
-        }
-    }
-    if(overflow) {out->count[0]=RING_CORNER_MAX_PER_SIDE;out->count[1]=RING_CORNER_MAX_PER_SIDE;return;}
-    for(unsigned k=0U;k<size;++k) {
-        unsigned side=pool[k].side,count=out->count[side];
-        if(count<RING_CORNER_MAX_PER_SIDE) {
-            out->point[side][count]=pool[k].p;++out->count[side];
-        }
-    }
-    for(unsigned side=0U;side<2U;++side) for(unsigned a=0U;a<out->count[side];++a)
-        for(unsigned b=a+1U;b<out->count[side];++b) if(out->point[side][b].y>out->point[side][a].y) {
-            ring_corner_point_t p=out->point[side][a];out->point[side][a]=out->point[side][b];out->point[side][b]=p;
-        }
-    if(context->flags!=NULL && out->count[0]==0U && out->count[1]==0U) {
-        unsigned paired=0U,near_paired=0U,near=(unsigned)rows*RC_NEAR_PERCENT/100U;
-        for(unsigned row=top;row<end;++row) if((context->flags[row]&3U)==3U) {
-            ++paired;if(row>=near) ++near_paired;
-        }
-        out->road_clear=(uint8_t)(paired*100U>=(end-top)*65U && near_paired*100U>=(end-near)*65U);
-    }
-    rc_270(binary,rows,cols,context,out);rc_360(binary,rows,cols,context,out);
-}
-
-void ring_corner_stabilize(const uint8_t *binary,const ring_corner_context_t *ctx,
-                          ring_corner_tracker_t *tracker,ring_corner_frame_t *out)
-{
-    if(tracker==NULL || out==NULL) return;
-    unsigned rows=out->rows,cols=out->cols;
-    out->continued_mask=0U;
-    if(binary==NULL || ctx==NULL || rows<60U || rows>RC_MAX_ROWS || cols<64U || cols>RC_MAX_COLS ||
-       !ctx->model_ready || !isfinite(ctx->width_near) || !isfinite(ctx->width_slope) ||
-       !isfinite(ctx->center_near) || !isfinite(ctx->center_slope) || ctx->width_near<1.f) {
-        memset(tracker,0,sizeof(*tracker));return;
-    }
-    if(tracker->rows!=rows || tracker->cols!=cols) {
-        memset(tracker,0,sizeof(*tracker));tracker->rows=(uint16_t)rows;tracker->cols=(uint16_t)cols;
-    }
-    /* Never turn bilateral/ambiguous quantity evidence into a single A. */
-    if((out->count[0] && out->count[1]) || out->count[0]>=RING_CORNER_MAX_PER_SIDE ||
-       out->count[1]>=RING_CORNER_MAX_PER_SIDE) {
-        memset(tracker->valid,0,sizeof(tracker->valid));return;
-    }
-    unsigned radius=rows/48U;if(radius<3U) radius=3U;
-    unsigned margin=radius*3U+2U,top=rows*RC_TOP_PERCENT/100U,end=rows*RC_END_PERCENT/100U;
-    for(unsigned side=0U;side<2U;++side) {
-        unsigned id=RING_GUIDE_A_LEFT+side;
-        if(out->count[1U-side]) {tracker->valid[side]=0U;continue;}
-        if(out->guide[id].valid) {
-            tracker->valid[side]=0U;
-            for(unsigned i=0U;i<out->count[side];++i) {
-                const ring_corner_point_t *p=&out->point[side][i];
-                if(p->kind==RING_CORNER_A && fabsf(p->x-out->guide[id].corner_x)<1.f &&
-                   fabsf(p->y-out->guide[id].corner_y)<1.f) {
-                    tracker->point[side]=*p;tracker->valid[side]=1U;tracker->misses[side]=0U;break;
+        if(y<h/5U || y>h*9U/10U) continue;
+        if(y+1<h && abs((int)b[side][y]-(int)b[side][y+1])>(int)jump) {
+            f->gap[side]=1;
+            if(!f->breakpoint[side].quality || y>f->breakpoint[side].y)
+                f->breakpoint[side]=point(b[side][y+1],y+1,RING_CORNER_B);
+            /* Lower A: row discontinuity maps into a bounded contour search. */
+            unsigned idx=f->border_index[side][y+1];
+            if(idx!=UINT16_MAX) {
+                unsigned first=idx>24 ? idx-24 : 0,last=idx+25;
+                if(last>length[side]) last=length[side];
+                for(unsigned i=first+3;i+3<last;++i) {
+                    int x=edge[side][i][0],yy=edge[side][i][1];
+                    int x0=edge[side][i-3][0],y0=edge[side][i-3][1];
+                    int x1=edge[side][i+3][0],y1=edge[side][i+3][1];
+                    if(yy>=y0 && yy>=y1 && abs(x1-x0)>=3 && (y0<yy || y1<yy) &&
+                       x>2 && x<(int)w-3 && yy>(int)h/3 &&
+                       (!f->a[side].quality || yy>f->a[side].y))
+                        f->a[side]=point(x,yy,RING_CORNER_A);
                 }
             }
-            continue;
+            /* A at the end of a near boundary can be exactly horizontal. */
+            if(valid(side,y+1) && !valid(side,y) && y>h/3U)
+                f->a[side]=point(b[side][y+1],y+1,RING_CORNER_A);
         }
-        if(!tracker->valid[side]) continue;
-        if(++tracker->misses[side]>RING_CORNER_REACQUIRE_FRAMES || out->count[side]>1U) {
-            tracker->valid[side]=0U;continue;
+        if(y>rad && y+rad<h && valid(side,y-rad) && valid(side,y) && valid(side,y+rad)) {
+            float x=sign*b[side][y],up=sign*b[side][y-rad],down=sign*b[side][y+rad];
+            if(x>up+1.f && x>down+1.f && (!f->p[side].quality || x>sign*f->p[side].x))
+                f->p[side]=point(b[side][y],y,RING_CORNER_NONE);
         }
-        const ring_corner_point_t old=tracker->point[side];
-        if(out->count[side] && (out->point[side][0].kind==RING_CORNER_B ||
-           fabsf(out->point[side][0].x-old.x)>8.f || fabsf(out->point[side][0].y-old.y)>8.f)) {
-            tracker->valid[side]=0U;continue;
+    }
+    unsigned missing=0;
+    for(unsigned y=h/5U;y<h*9U/10U;++y) {
+        if(!valid(side,y)) {
+            if(!missing && valid(side,y-1) && (!f->breakpoint[side].quality || y>f->breakpoint[side].y)) {
+                f->gap[side]=1;f->breakpoint[side]=point(b[side][y-1],y-1,RING_CORNER_B);
+            }
+            ++missing;
         }
-        ring_corner_guide_t best={0};ring_corner_point_t best_point={0};float best_score=-1.e9f;
-        /* Small bounded search: the old location only seeds current geometry.
-         * Aperture/residual hysteresis is local; global discovery is unchanged. */
-        for(int dy=-4;dy<=4;dy+=2) for(int dx=-4;dx<=4;dx+=2) {
-            float x=old.x+(float)dx,y=old.y+(float)dy;
-            if(x<(float)margin || x>(float)(cols-margin-1U) ||
-               y<(float)(top+margin) || y>(float)(end-margin-1U)) continue;
-            ring_corner_point_t p;uint8_t found_side;
-            if(!rc_vertex(binary,cols,x,y,(float)radius,&p,1U) || p.kind!=RING_CORNER_A ||
-               fabsf(p.x-old.x)>8.f || fabsf(p.y-old.y)>8.f ||
-               p.main_dx*old.main_dx+p.main_dy*old.main_dy<.85f ||
-               p.branch_dx*old.branch_dx+p.branch_dy*old.branch_dy<.70f ||
-               !rc_associated(binary,cols,end,ctx,&p,(float)radius,&found_side) || found_side!=side) continue;
-            ring_corner_guide_t g={0};
-            g.boundary[side]=rc_ray(p.x,p.y,-p.main_dx,-p.main_dy,top,end,cols);
-            g.corner_side=(uint8_t)side;g.corner_kind=p.kind;g.corner_x=p.x;g.corner_y=p.y;
-            (void)rc_finish(binary,rows,cols,ctx,&g);
-            if(!g.valid || g.confidence<70U) continue;
-            float score=(float)p.quality-fabsf(p.x-old.x)-fabsf(p.y-old.y);
-            if(score>best_score) {best=g;best_point=p;best_score=score;}
+        else {
+            if(missing>=h/14U && (!f->breakpoint[side].quality || y>f->breakpoint[side].y)) {f->gap[side]=1;f->breakpoint[side]=point(b[side][y],y,RING_CORNER_B);}
+            missing=0;
         }
-        if(best.valid) {
-            out->guide[id]=best;tracker->point[side]=best_point;
-            out->continued_mask|=(uint8_t)(1U<<side);out->road_clear=0U;
+    }
+    /* A is the inward lip of the LOWER boundary component, below a blank
+     * interval. Search the row-to-contour mapped neighbourhood; the P belongs
+     * to the separate upper island, not to this lip. */
+    ring_corner_point_t contour_a=f->a[side];
+    memset(&f->a[side],0,sizeof(f->a[side]));
+    for(unsigned y=h/3U;y+4<h;++y) {
+        if(!valid(side,y) || valid(side,y-1)) continue;
+        unsigned bottom=y;
+        while(bottom+1<h && valid(side,bottom+1)) ++bottom;
+        if(bottom-y<h/15U || bottom<h*9U/10U) continue;
+        unsigned best=y;
+        for(unsigned yy=y;yy<=bottom;++yy) if(sign*b[side][yy]>sign*b[side][best]) best=yy;
+        if(best+3<h && sign*((float)b[side][best]-b[side][h-2])>w*.015f)
+            f->a[side]=point(b[side][best],best,RING_CORNER_A);
+    }
+    if(!f->a[side].quality && contour_a.quality) f->a[side]=contour_a;
+    if(f->a[side].quality) {
+        memset(&f->p[side],0,sizeof(f->p[side]));
+        unsigned end=(unsigned)f->a[side].y;
+        for(unsigned y=rad+1;y+rad<end;++y) {
+            if(!valid(side,y-rad) || !valid(side,y) || !valid(side,y+rad)) continue;
+            float x=sign*b[side][y];
+            if(x>sign*b[side][y-rad]+1 && x>sign*b[side][y+rad]+1 &&
+               (!f->p[side].quality || x>sign*f->p[side].x))
+                f->p[side]=point(b[side][y],y,RING_CORNER_NONE);
         }
+    }
+    /* V: downward tip with contour arms on opposite x sides, not the rounded P. */
+    unsigned r=h/30U+3U;
+    for(unsigned i=r;i+r<length[side];++i) {
+        float x=edge[side][i][0],y=edge[side][i][1];
+        float dx0=(float)edge[side][i-r][0]-x,dy0=(float)edge[side][i-r][1]-y;
+        float dx1=(float)edge[side][i+r][0]-x,dy1=(float)edge[side][i+r][1]-y;
+        if(y<h*.20f || y>h*.88f || x<w*.08f || x>w*.92f) continue;
+        if(dy0<=0 && dy1<=0 && dy0+dy1<-(float)r*.45f && dx0*dx1<0 && fabsf(dx0)+fabsf(dx1)>r*.6f)
+            if(!f->v[side].quality || y>f->v[side].y) f->v[side]=point(x,y,RING_CORNER_B);
+    }
+    f->quality[side]=(uint8_t)(q*100U/(h-4U));
+    f->continuous[side]=(uint8_t)(q*100U>=(h-4U)*70U && total && good*100U>=total*83U && q*100U>=(h-4U)*70U);
+    f->bottom_open[side]=(uint8_t)(near_good*100U<(h/3U)*45U);
+    f->count[side]=(uint8_t)(f->a[side].quality!=0);
+    if(f->count[side]) f->point[side][0]=f->a[side];
+}
+/* Row-indexed coarse search, then local inward tip at each discontinuity.
+ * Median support rejects LCD annotations/single-pixel staircases. Two arms
+ * must have different slopes; a smooth bend cannot create a mouth pair. */
+static float profile(unsigned side,int y,unsigned w)
+{
+    float values[5];
+    for(int i=0;i<5;++i) values[i]=side ? (float)(w-1U-b[side][y+i-2]) : b[side][y+i-2];
+    for(unsigned i=1;i<5;++i) for(unsigned j=i;j && values[j]<values[j-1];--j) {
+        float t=values[j];values[j]=values[j-1];values[j-1]=t;
+    }
+    return values[2];
+}
+static void mouth(unsigned side,unsigned h,unsigned w,ring_corner_frame_t *f)
+{
+    int radius=(int)h/24+2,best=-1;float score=0;
+    for(int y=(int)h/3;y<(int)(h*4U/5U);++y) {
+        float before=profile(side,y-radius,w),here=profile(side,y,w),after=profile(side,y+radius,w);
+        float turn=2*here-before-after;
+        if(here-before>w*.04f && turn>w*.055f && turn>score) {score=turn;best=y;}
+    }
+    if(best<0) return;
+    int lower=best;
+    for(int y=best-radius/2;y<=best+radius/2;++y)
+        if(profile(side,y,w)>profile(side,lower,w)) lower=y;
+    int upper=-1;score=0;
+    for(int y=radius+3;y<lower-radius*2;++y) {
+        float here=profile(side,y,w),drop=here-profile(side,y+radius,w);
+        if(here>w*.12f && drop>w*.05f && drop>score) {score=drop;upper=y;}
+    }
+    if(upper<0 || lower-upper<(int)h/10) return;
+    float lx=profile(side,lower,w),ux=profile(side,upper,w);
+    if(side) {lx=w-1-lx;ux=w-1-ux;}
+    f->mouth_lower[side]=point(lx,lower,RING_CORNER_A);
+    f->mouth_upper[side]=point(ux,upper,RING_CORNER_B);
+}
+static float line_x(const ring_corner_line_t *l,float y)
+{return l->x0+(l->x1-l->x0)*(y-l->y0)/(l->y1-l->y0);}
+static void segment(ring_corner_guide_t *g,unsigned side,float x0,float y0,float x1,float y1)
+{
+    if(fabsf(y1-y0)<2.f) return;
+    g->boundary[side]=(ring_corner_line_t){x0,y0,x1,y1,1};
+}
+/* Source calculate_s_i: fit the intact ten-row section above the break,
+ * then extrapolate only the missing section. uint32/float prevent overflow. */
+static int extend(ring_corner_guide_t *g,unsigned side,unsigned h,unsigned w,const ring_corner_frame_t *f)
+{
+    if(!f->breakpoint[side].quality) return 0;
+    int end=(int)f->breakpoint[side].y-(int)h/30-1,start=end-(int)h/12;
+    if(start<2) start=2;
+    unsigned near=0;
+    for(unsigned y=h*2U/3U;y+1<h;++y) if(valid(side,y)) ++near;
+    int approaching=near>h/4U;
+    if(approaching) {start=(int)(h*4U/5U);end=(int)h-3;}
+    float n=0,sy=0,sx=0,syy=0,sxy=0;
+    for(int y=start;y<end;++y) if(valid(side,(unsigned)y)) {float x=b[side][y];++n;sy+=y;sx+=x;syy+=y*y;sxy+=y*x;}
+    float den=n*syy-sy*sy;if(n<4 || den<1) return 0;
+    float k=(n*sxy-sy*sx)/den,c=(sx-k*sy)/n;
+    if(approaching) segment(g,side,clamp(k*2+c,0,w-1),2,clamp(k*start+c,0,w-1),start);
+    else segment(g,side,clamp(k*end+c,0,w-1),end,clamp(k*(h-1)+c,0,w-1),h-1);
+    return 1;
+}
+static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *g)
+{
+    float sum=0,weight=0,ns=0,fs=0;unsigned n=0,nc=0,fc=0;uint8_t linked=1;
+    unsigned top=0,end=h;
+    if(g->clip_upper) {
+        top=h;
+        for(unsigned side=0;side<2;++side) if(g->boundary[side].valid) {
+            unsigned y=(unsigned)ceilf(fminf(g->boundary[side].y0,g->boundary[side].y1));
+            if(y<top) top=y;
+        }
+    }
+    if(top>=end || end-top<6U) return;
+    g->active_top=(uint16_t)top;g->active_end=(uint16_t)end;
+    unsigned span=end-top,zone=span/3U;
+    unsigned near_start=g->clip_upper ? end-zone : h*2U/3U;
+    unsigned far_end=g->clip_upper ? top+zone : h/3U;
+    for(unsigned y=0;y<h;++y) {
+        float l=b[0][y],r=b[1][y];int lv=valid(0,y),rv=valid(1,y);
+        for(unsigned side=0;side<2;++side) {
+            const ring_corner_line_t *s=&g->boundary[side];if(!s->valid) continue;
+            float low=fminf(s->y0,s->y1),high=fmaxf(s->y0,s->y1);
+            if(y+1>=low && y<=high+1) {if(side) {r=line_x(s,y);rv=1;}else {l=line_x(s,y);lv=1;}}
+        }
+        int supported=lv || rv;
+        if(!lv && l<=w*.04f) {l=0;lv=1;}
+        if(!rv && r>=w*.96f) {r=w-1;rv=1;}
+        int ok=y>=top && supported && lv && rv && r-l>w*.05f && l>=0 && r<w;
+        unsigned x=(unsigned)clamp((l+r)*.5f,0,w-1);
+        if(ok && !im[y*w+x]) ok=0;
+        unsigned index=0;
+        while(index+1<RING_CORNER_CENTER_SAMPLES && (index+1)*(h-1)/(RING_CORNER_CENTER_SAMPLES-1)<=y) ++index;
+        if(!ok) linked=0;
+        if(y==index*(h-1)/(RING_CORNER_CENTER_SAMPLES-1)) {
+            if(ok) {g->center[index]=(uint16_t)x;g->center_valid|=(uint16_t)(1U<<index);
+                if(linked && index) g->center_link_valid|=(uint16_t)(1U<<index);}
+            linked=(uint8_t)ok;
+        }
+        if(!ok) continue;
+        float wt=y>=near_start ? 3.f : (y>=far_end ? 2.f : 1.f);
+        sum+=x*wt;weight+=wt;++n;
+        if(y>=near_start) {ns+=x;++nc;}if(y<far_end) {fs+=x;++fc;}
+    }
+    g->confidence=(uint8_t)(n*100U/span);
+    if(n*100U<span*50U || nc<span/8U || fc<3U || !weight) return;
+    g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
+    g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
+}
+/* Entry P must belong to an island with a visible outer white flank.
+ * A crest on the image roof/background stripe is not an island point. */
+#define ISLAND_QUEUE 8192U
+static uint32_t island_queue[ISLAND_QUEUE];
+static uint8_t island_seen[(480U*752U+7U)/8U];
+static int island_point(const uint8_t *im,unsigned h,unsigned w,unsigned side,const ring_corner_point_t *p)
+{
+    if(!p->quality) return 0;
+    int x=(int)p->x,y=(int)p->y,dir=side ? 1 : -1;
+    if(y<1 || y>=(int)h-1) return 0;
+    x+=dir;
+    for(unsigned n=0;n<5U && x>0 && x<(int)w-1 && im[(unsigned)y*w+(unsigned)x];++n) x+=dir;
+    if(x<=0 || x>=(int)w-1 || im[(unsigned)y*w+(unsigned)x]) return 0;
+    memset(island_seen,0,sizeof(island_seen));
+    unsigned head=0,tail=1;uint32_t seed=(uint32_t)y*w+(unsigned)x;
+    island_queue[0]=seed;island_seen[seed/8U]|=(uint8_t)(1U<<(seed%8U));
+    unsigned min_y=(unsigned)y,max_y=(unsigned)y;
+    while(head<tail) {
+        uint32_t pos=island_queue[head++];unsigned cy=pos/w,cx=pos%w;
+        if(cx==0 || cy==0 || cx+1==w || cy+1==h) return 0;
+        if(cy<min_y) min_y=cy;
+        if(cy>max_y) max_y=cy;
+        for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
+            uint32_t next=(uint32_t)((int)cy+dy)*w+(unsigned)((int)cx+dx);
+            uint8_t bit=(uint8_t)(1U<<(next%8U));
+            if(!im[next] && !(island_seen[next/8U]&bit)) {
+                if(tail>=ISLAND_QUEUE) return 0;
+                island_seen[next/8U]|=bit;island_queue[tail++]=next;
+            }
+        }
+    }
+    /* Actual island: enclosed black component, not the outer bend/background.
+     * Bounded queue overflow rejects an ambiguous entry rather than wrapping. */
+    return tail>=w*h/400U && max_y-min_y>=h/20U;
+}
+void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corner_context_t *ctx,ring_corner_frame_t *f)
+{
+    (void)ctx;if(!f) return;memset(f,0,sizeof(*f));
+    if(!im || h<20 || h>480 || w<32 || w>752) return;
+    f->rows=h;f->cols=w;f->detector_near_row=h-2;
+    memset(f->border_index,255,sizeof(f->border_index));memset(flags,0,sizeof(flags));
+    float anchor=(w-1)*.5f;int seed[2]={0,w-1},seed_y=h-2;
+    for(int y=h-2;y>=0;--y) {
+        float best=1e9f;int bl=0,br=w-1,found=0;
+        for(int x=0;x<w;) {
+            while(x<w && !im[y*w+x]) ++x;
+            int l=x;
+            while(x<w && im[y*w+x]) ++x;
+            int r=x-1;
+            if(r-l<(int)w/25) continue;
+            float dist=anchor<l ? l-anchor : (anchor>r ? anchor-r : 0);
+            float score=dist*4+fabsf((l+r)*.5f-anchor)*.1f;
+            if(score<best) {best=score;bl=l;br=r;found=1;}
+        }
+        b[0][y]=(uint16_t)bl;b[1][y]=(uint16_t)br;
+        if(found) {
+            if(bl>(int)(w/40U+1U)) flags[y]|=1;
+            if(br<(int)(w-w/40U-2U)) flags[y]|=2;
+            anchor=(bl+br)*.5f;
+            if(y==h-2 || (seed_y==h-2 && !flags[h-2])) {seed[0]=bl>1 ? bl-1 : 0;seed[1]=br<w-2 ? br+1 : w-1;seed_y=y;}
+        }
+    }
+    b[0][h-1]=b[0][h-2];b[1][h-1]=b[1][h-2];flags[h-1]=flags[h-2];
+    for(unsigned side=0;side<2;++side) {
+        trace(im,h,w,side,seed[side],seed_y,f);features(h,w,side,f);
+    }
+    for(unsigned side=0;side<2;++side) {
+        if(f->p[side].quality && (side ? f->p[side].x<w*.5f : f->p[side].x>w*.5f))
+            memset(&f->p[side],0,sizeof(f->p[side]));
+    }
+    /* A contour may traverse the whole roof after the two tracers meet.
+     * Assign its V tip by native lateral location, not the tracer of origin. */
+    if(f->v[0].quality && f->v[0].x>w*.55f) {f->v[1]=f->v[0];memset(&f->v[0],0,sizeof(f->v[0]));}
+    if(f->v[1].quality && f->v[1].x<w*.45f) {f->v[0]=f->v[1];memset(&f->v[1],0,sizeof(f->v[1]));}
+    f->paired=(uint8_t)(!f->bottom_open[0] && !f->bottom_open[1]);
+    f->road_clear=(uint8_t)(f->paired && !f->gap[0] && !f->gap[1] && f->quality[0]>65 && f->quality[1]>65);
+    for(unsigned side=0;side<2;++side)
+        f->entry[side]=(uint8_t)(f->gap[side] && f->a[side].quality && f->p[side].quality &&
+            f->p[side].y+h*.22f<f->a[side].y && island_point(im,h,w,side,&f->p[side]) && f->continuous[1-side] && !f->gap[1-side]);
+    for(unsigned side=0;side<2;++side) mouth(side,h,w,f);
+    f->paired_mouth=(uint8_t)(f->mouth_lower[0].quality && f->mouth_lower[1].quality &&
+        fabsf(f->mouth_lower[0].y-f->mouth_lower[1].y)<h*.20f &&
+        fabsf(f->mouth_upper[0].y-f->mouth_upper[1].y)<h*.20f &&
+        f->mouth_lower[0].x<f->mouth_lower[1].x && f->mouth_upper[0].x<f->mouth_upper[1].x);
+    if(f->paired_mouth) {
+        f->entry[0]=0;f->entry[1]=0;
+        for(unsigned side=0;side<2;++side) {
+            f->count[side]=2;f->point[side][0]=f->mouth_lower[side];f->point[side][1]=f->mouth_upper[side];
+        }
+    }
+    f->cross_entry=(uint8_t)(f->paired_mouth || (f->bottom_open[0] && f->bottom_open[1] && f->gap[0] && f->gap[1] && !f->entry[0] && !f->entry[1]));
+    ring_corner_guide_t *cross=&f->guide[RING_GUIDE_270_EXTEND];
+    if(f->cross_entry && extend(cross,0,h,w,f) && extend(cross,1,h,w,f)) finish(im,h,w,cross);
+    ring_corner_guide_t *connected=&f->guide[RING_GUIDE_270_CONNECT];
+    if(f->paired_mouth) {
+        for(unsigned side=0;side<2;++side) {
+            ring_corner_point_t u=f->mouth_upper[side],l=f->mouth_lower[side];
+            segment(connected,side,u.x,u.y,l.x,l.y);
+        }
+        finish(im,h,w,connected);
+    }
+    if(connected->valid) *cross=*connected;
+    for(unsigned side=0;side<2;++side) for(unsigned stage=1;stage<=7;++stage) {
+        unsigned other=1-side;float outer=side ? w-1.f : 0.f;
+        ring_corner_guide_t *g=&f->guide[ring_pdf_guide(stage,side)];
+        ring_corner_point_t a=f->a[side],p=f->p[side],v=f->v[side],ov=f->v[other],bp=f->breakpoint[other];
+        g->corner_side=(uint8_t)side;g->corner_x=a.x;g->corner_y=a.y;
+        if(stage==1 && a.quality && p.quality) segment(g,side,p.x,p.y,a.x,a.y);
+        if(stage==2 && p.quality) segment(g,side,p.x,p.y,outer,h-1);
+        if(stage==3 && v.quality) segment(g,other,v.x,v.y,b[other][h-2],h-1);
+        if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);
+        if((stage==5 || stage==6) && bp.quality) {
+            /* User's exit sketch: close the local mouth from its lower outer
+             * corner to the REAL upper cross-boundary, not an image corner.
+             * Probe one quarter of the near lane width inward, then search
+             * upward for a supported black roof (three consecutive pixels).
+             * The mirrored construction serves a clockwise/right ring. */
+            float lane=clamp((float)b[1][h-2]-b[0][h-2],w*.20f,w*.80f);
+            int x=(int)clamp(bp.x+(side ? 1.f : -1.f)*lane*.25f,2,w-3);
+            unsigned black=0;int roof=-1;
+            for(int y=(int)bp.y-3;y>1;--y) {
+                if(!im[(unsigned)y*w+(unsigned)x]) ++black;else black=0;
+                if(black>=3) {roof=y+3;break;}
+            }
+            if(roof>1 && roof<bp.y-3) segment(g,other,x,roof,bp.x,bp.y);
+        }
+        if(stage==7 && v.quality) {
+            /* Second visit: the SAME sharp V now closes the inner boundary.
+             * Keep the lower anchor inside the visible incoming white road. */
+            float anchor=side ? fminf(b[side][h-2],w*.75f) : fmaxf(b[side][h-2],w*.25f);
+            segment(g,side,v.x,v.y,anchor,h-1);
+        }
+        if(stage==3 || stage==4) g->clip_upper=1;
+        if(stage==6 || stage==5 || g->boundary[0].valid || g->boundary[1].valid) finish(im,h,w,g);
+    }
+    /* Preview starts at the recognized entry, never guesses a motion stage. */
+    for(unsigned side=0;side<2;++side) f->guide[RING_GUIDE_A_LEFT+side]=f->guide[ring_pdf_guide(1,side)];
+    memcpy(f->border,b,sizeof(b));memcpy(f->border_flags,flags,sizeof(flags));
+}
+static int black_patch(const uint8_t *im,unsigned cols,int x,int y)
+{
+    unsigned n=0;
+    for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) if(!im[(unsigned)(y+dy)*cols+(unsigned)(x+dx)]) ++n;
+    return n>=5;
+}
+static int reacquire(const uint8_t *im,unsigned h,unsigned w,unsigned side,int upper,
+                     const ring_corner_point_t *old,ring_corner_point_t *found)
+{
+    float best=1e9f;int sign=side ? -1 : 1,radius=4;
+    for(int dy=-5;dy<=5;++dy) for(int dx=-7;dx<=7;++dx) {
+        int x=(int)old->x+dx,y=(int)old->y+dy;
+        if(x<6 || y<6 || x>=(int)w-6 || y>=(int)h-6) continue;
+        int inward=x+sign*radius,outward=x-sign*radius;
+        int by=y+(upper ? -radius : radius),wy=y+(upper ? radius : -radius);
+        if(!black_patch(im,w,outward,by) || black_patch(im,w,inward,by) ||
+           black_patch(im,w,outward,wy) || black_patch(im,w,inward,wy)) continue;
+        float score=(float)(dx*dx+dy*dy);
+        if(score<best) {best=score;*found=point(x,y,upper ? RING_CORNER_B : RING_CORNER_A);}
+    }
+    return best<1e9f;
+}
+void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ring_corner_tracker_t *s,ring_corner_frame_t *f)
+{
+    (void)ctx;if(!s || !f || !im || !f->rows || !f->cols) return;
+    if(s->rows!=f->rows || s->cols!=f->cols) {memset(s,0,sizeof(*s));s->rows=f->rows;s->cols=f->cols;}
+    if(!f->paired_mouth && s->valid[0] && s->valid[1]) {
+        ring_corner_point_t lower[2],upper[2];int ok=1;
+        for(unsigned side=0;side<2;++side) {
+            if(!reacquire(im,f->rows,f->cols,side,0,&s->point[side],&lower[side]) ||
+               !reacquire(im,f->rows,f->cols,side,1,&s->upper[side],&upper[side])) ok=0;
+        }
+        if(ok) {
+            ring_corner_guide_t *g=&f->guide[RING_GUIDE_270_CONNECT];memset(g,0,sizeof(*g));
+            for(unsigned side=0;side<2;++side) segment(g,side,upper[side].x,upper[side].y,lower[side].x,lower[side].y);
+            finish(im,f->rows,f->cols,g);
+            if(g->valid) {
+                f->paired_mouth=1;f->cross_entry=1;f->entry[0]=0;f->entry[1]=0;
+                for(unsigned side=0;side<2;++side) {f->mouth_lower[side]=lower[side];f->mouth_upper[side]=upper[side];}
+                f->guide[RING_GUIDE_270_EXTEND]=*g;
+            }
+        }
+    }
+    /* Reacquire a temporarily missed V from CURRENT contour samples. Smaller
+     * support is allowed only inside the previous vertex neighbourhood; a
+     * rounded ordinary bend cannot establish a new V through this tracker. */
+    for(unsigned side=0;side<2;++side) {
+        if(!f->v[side].quality && s->v_valid[side]) {
+            float best=1e9f;ring_corner_point_t vertex;memset(&vertex,0,sizeof(vertex));
+            for(unsigned i=3;i+3<length[side];++i) {
+                int x=edge[side][i][0],y=edge[side][i][1];
+                float dx=x-s->v[side].x,dy=y-s->v[side].y;
+                if(fabsf(dx)>f->cols*.08f || fabsf(dy)>f->rows*.12f || x<5 || x>=f->cols-5 || y<5 || y>=f->rows-5) continue;
+                int x0=edge[side][i-3][0],y0=edge[side][i-3][1],x1=edge[side][i+3][0],y1=edge[side][i+3][1];
+                if(y0>y || y1>y || y0+y1>2*y-2 || (x0-x)*(x1-x)>=0) continue;
+                if(!black_patch(im,f->cols,x,y-3) || black_patch(im,f->cols,x,y+3)) continue;
+                float distance=dx*dx+dy*dy;
+                if(distance<best) {best=distance;vertex=point(x,y,RING_CORNER_B);}
+            }
+            if(vertex.quality) {
+                f->v[side]=vertex;f->v_reacquired|=(uint8_t)(1U<<side);
+                unsigned other=1U-side;
+                ring_corner_guide_t *g=&f->guide[ring_pdf_guide(3,side)];memset(g,0,sizeof(*g));
+                g->clip_upper=1;segment(g,other,vertex.x,vertex.y,b[other][f->rows-2],f->rows-1);finish(im,f->rows,f->cols,g);
+                g=&f->guide[ring_pdf_guide(4,other)];memset(g,0,sizeof(*g));
+                g->clip_upper=1;segment(g,side,vertex.x,vertex.y,side ? f->cols-1.f : 0.f,f->rows-1);finish(im,f->rows,f->cols,g);
+                g=&f->guide[ring_pdf_guide(7,side)];memset(g,0,sizeof(*g));
+                float anchor=side ? fminf(b[side][f->rows-2],f->cols*.75f) : fmaxf(b[side][f->rows-2],f->cols*.25f);
+                segment(g,side,vertex.x,vertex.y,anchor,f->rows-1);finish(im,f->rows,f->cols,g);
+            }
+        }
+        if(f->v[side].quality) {s->v[side]=f->v[side];s->v_valid[side]=1;s->v_misses[side]=0;}
+        else if(s->v_misses[side]<3) ++s->v_misses[side];else s->v_valid[side]=0;
+    }
+    for(unsigned side=0;side<2;++side) {
+        if(f->paired_mouth && f->guide[RING_GUIDE_270_CONNECT].valid) {
+            s->point[side]=f->mouth_lower[side];s->upper[side]=f->mouth_upper[side];s->valid[side]=1;s->misses[side]=0;
+        } else if(s->misses[side]<3) ++s->misses[side];else s->valid[side]=0;
     }
 }

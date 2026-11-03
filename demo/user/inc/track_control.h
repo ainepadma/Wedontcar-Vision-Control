@@ -3,13 +3,14 @@
 
 #include <stdint.h>
 
-/* Shared by firmware and host defaults; encoder counts per 10-ms tick.
- * First loaded-running tune, not a calibrated physical speed specification. */
+/* Encoder counts per 10-ms tick. The nominal m/s estimates below use the
+ * hand-measured 2904.25 counts/revolution and a 64-mm wheel diameter. */
 #define TRACK_SPEED_STRAIGHT 120.0f
-#define TRACK_SPEED_CURVE_MIN 80.0f
-#define TRACK_SPEED_FULL_STRAIGHT 240.0f
-#define TRACK_SPEED_FULL_CURVE_MIN 160.0f
-#define TRACK_SPEED_FULL_SCALE (TRACK_SPEED_FULL_STRAIGHT / TRACK_SPEED_STRAIGHT)
+/* LOW档弯道最低目标与无有效图像时的兜底目标。 */
+#define TRACK_SPEED_CURVE_MIN 90.0f
+/* FULL档：直道约1.75 m/s，弯道最低约1.00 m/s（架空轮速估算）。 */
+#define TRACK_SPEED_FULL_STRAIGHT 253.0f
+#define TRACK_SPEED_FULL_CURVE_MIN 145.0f
 
 typedef enum
 {
@@ -95,8 +96,8 @@ void track_control_observe_bottom(track_control_state_t *state, int16_t error,
                                   uint8_t valid, uint32_t now_ms);
 void track_control_toggle(track_control_state_t *state, uint32_t now_ms);
 /* Image observations and steering always remain active. This is the track
- * portion of the C14 master protection switch; the ISR applies the same switch
- * to encoder direction, no-feedback and overspeed protection. */
+ * portion of C14; encoder direction, no-feedback and overspeed stops remain
+ * active independently of this switch. */
 void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled);
 void track_control_stop(track_control_state_t *state, uint8_t reason);
 track_control_output_t track_control_tick(track_control_state_t *state,

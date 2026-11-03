@@ -431,13 +431,50 @@ uint8_t image_track_preprocess_stable(uint8_t *image, uint16_t rows, uint16_t co
     uint32_t enhanced_cut = (uint32_t)global_cut * gain / 65536U;
     *threshold = (uint8_t)(enhanced_cut > 255U ? 255U : enhanced_cut);
     for (uint16_t y = 0U; y < rows; ++y)
+    {
+        uint8_t row_override = 0U;
+        uint16_t row_cut = 0U;
+        if (y >= roi_first && y < roi_end)
+        {
+            memset(histogram, 0, 256U * sizeof(*histogram));
+            uint16_t global_white = 0U;
+            for (uint16_t x = 0U; x < cols; ++x)
+            {
+                uint8_t value = image[(uint32_t)y * cols + x];
+                ++histogram[value];
+                global_white += (uint16_t)((uint32_t)value * 65536U >
+                                           (uint32_t)global_cut * gain);
+            }
+            uint16_t p10 = 0U, p90 = 0U;
+            uint8_t found_p10 = 0U;
+            uint32_t cumulative = 0U;
+            for (uint16_t value = 0U; value < 256U; ++value)
+            {
+                cumulative += histogram[value];
+                if (!found_p10 && cumulative >= cols / 10U)
+                { p10 = value; found_p10 = 1U; }
+                if (cumulative >= (uint32_t)cols * 9U / 10U) { p90 = value; break; }
+            }
+            /* A lighting band can make the tiled threshold classify almost
+             * the entire row as one colour. Recover only when that same row
+             * still contains a measurable dark and bright population. */
+            if ((global_white * 10U <= cols || global_white * 10U >= (uint32_t)cols * 9U) &&
+                (uint32_t)(p90 - p10) * 256U >= (uint32_t)gain * 12U)
+            {
+                row_override = 1U;
+                row_cut = (uint16_t)((p10 + p90) / 2U);
+            }
+        }
         for (uint16_t x = 0U; x < cols; ++x)
         {
+            uint8_t value = image[(uint32_t)y * cols + x];
             uint16_t cut = y >= roi_first && y < roi_end ?
                 image_tile_cut(tiles, ground_rows, cols, (uint16_t)(y - roi_first), x) : global_cut;
-            uint32_t current = (uint32_t)image[(uint32_t)y * cols + x] * 65536U;
-            image[(uint32_t)y * cols + x] = current > (uint32_t)cut * gain ? 255U : 0U;
+            image[(uint32_t)y * cols + x] = row_override ?
+                (value > row_cut ? 255U : 0U) :
+                ((uint32_t)value * 65536U > (uint32_t)cut * gain ? 255U : 0U);
         }
+    }
     const uint16_t limits[4] = {0U, roi_first, roi_end, rows};
     for (uint16_t i = 0U; i < 3U; ++i)
         if ((uint16_t)(limits[i + 1U] - limits[i]) >= 3U)
