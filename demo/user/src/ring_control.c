@@ -73,6 +73,7 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         if(++s->vote_frames<RING_CONFIRM_FRAMES) return;
         s->kind=(uint8_t)kind;s->direction=side ? -1 : 1;s->action_locked=1;
         s->entry_passed=0;s->exit_seen=0;s->exit_gap_seen=0;
+        s->bridge_seen=0;s->bridge_passed=0;s->exit_armed=0;s->bridge_clear_frames=0;
         s->corner_have_guide=0;s->corner_guide_id=0;s->selected_path=invalid();
         s->entry_seen=1;s->event_started_ms=now;++s->event_id;stage(s,1,now);return;
     }
@@ -93,14 +94,32 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
     switch(s->corner_stage) {
     case 1: if(confirmed(s,!f->a[in].quality && f->bottom_open[in] && f->p[in].quality && f->continuous[out])) stage(s,2,now);break;
     case 2: if(confirmed(s,f->v[in].quality && !f->p[in].quality && f->continuous[out])) stage(s,3,now);break;
-    case 3: if(confirmed(s,(!f->v[in].quality || (f->v_reacquired&(1U<<in))) && f->v[out].quality && !(f->v_reacquired&(1U<<out)) && f->v[out].y>f->rows*.50f)) stage(s,4,now);break;
+    case 3: if(confirmed(s,(!f->v[in].quality || (f->v_reacquired&(1U<<in))) && f->v[out].quality && !(f->v_reacquired&(1U<<out)) && f->v[out].y>f->rows*.25f)) stage(s,4,now);break;
     case 4: if(confirmed(s,f->paired && (!f->v[out].quality || f->v[out].y<f->rows*.25f))) {stage(s,5,now);s->entry_passed=1;}break;
     case 5:
+        if(f->gap[out] && f->guide[ring_pdf_guide(5,in)].boundary[out].valid) {
+            s->bridge_seen=1;
+            if(f->breakpoint[out].y>f->rows*.50f) s->bridge_passed=1;
+        }
         /* Only arm a revisit after paired in-ring road and disappearance of
          * the first V. A held/visible first junction cannot be an exit. */
         if(confirmed(s,f->paired && !f->v[in].quality)) {s->exit_gap_seen=1;stage(s,6,now);}
         break;
-    case 6: if(confirmed(s,s->exit_gap_seen && f->v[in].quality && !(f->v_reacquired&(1U<<in)))) stage(s,7,now);break;
+    case 6:
+        /* The previous right-mouth turn MUST be passed before a new inner V
+         * can be the final exit. Missing/reappearing first V is insufficient. */
+        if(f->gap[out] && f->breakpoint[out].quality) {
+            s->bridge_seen=1;s->bridge_clear_frames=0;
+            if(f->breakpoint[out].y>f->rows*.50f) s->bridge_passed=1;
+        } else if(s->bridge_seen && s->bridge_passed && f->paired && !f->v[in].quality) {
+            if(s->bridge_clear_frames<255) ++s->bridge_clear_frames;
+            if(s->bridge_clear_frames>=RING_CLEAR_FRAMES) s->exit_armed=1;
+        } else s->bridge_clear_frames=0;
+        if(confirmed(s,s->exit_armed &&
+           !(f->gap[out] && f->breakpoint[out].quality && f->breakpoint[out].y>=f->rows*.50f) &&
+           !(f->a[out].quality && f->a[out].y>=f->rows*.60f) && f->continuous[out] &&
+           f->v[in].quality && !(f->v_reacquired&(1U<<in)))) stage(s,7,now);
+        break;
     case 7: if(confirmed(s,f->road_clear)) complete(s);break;
     default: break;
     }
@@ -118,6 +137,11 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
     unsigned id=s->kind==TRACK_RING_360 ? ring_pdf_guide(s->corner_stage,s->direction==1 ? 0 : 1) :
         (s->corner_stage==2 ? RING_GUIDE_NONE :
          (f->guide[RING_GUIDE_270_CONNECT].valid ? RING_GUIDE_270_CONNECT : RING_GUIDE_270_EXTEND));
+    if(s->kind==TRACK_RING_360 && s->corner_stage==3 && !f->guide[id].valid &&
+       f->v[s->direction==1 ? 1U : 0U].quality) {
+        unsigned next=ring_pdf_guide(4,s->direction==1 ? 0U : 1U);
+        if(f->guide[next].valid) id=next;
+    }
     const ring_corner_guide_t *g=&f->guide[id];
     if(s->kind==TRACK_RING_360 && (s->corner_stage==5 || s->corner_stage==6) &&
        !g->boundary[0].valid && !g->boundary[1].valid) id=RING_GUIDE_NONE;

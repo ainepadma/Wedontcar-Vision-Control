@@ -114,7 +114,7 @@ static char screen_path_source='N';
 
 // 冻结一帧快照，由 UART 中断慢慢发送。传输中不覆盖，忙时跳过新预览帧。
 // 数据头及诊断文本也纳入同一队列，禁止 printf 插入正在发送的图像。
-#define CAMERA_DIAGNOSTIC_SIZE 1536U
+#define CAMERA_DIAGNOSTIC_SIZE 2048U
 static uint8_t camera_tx_packet[CAMERA_DIAGNOSTIC_SIZE + 12U + sizeof(image)];
 static volatile uint32_t camera_tx_position;
 static volatile uint32_t camera_tx_length;
@@ -194,12 +194,13 @@ static void assistant_send_image(void)
     float snapshot_left_speed = speed_real_l, snapshot_right_speed = speed_real_r;
     float snapshot_left_pwm = speed_pwm_l, snapshot_right_pwm = speed_pwm_r;
     imu_navigation_state_t snapshot_imu = imu_navigation;
+    track_stop_snapshot_t snapshot_last_stop = track_last_stop;
     static ring_control_state_t snapshot_ring; /* Main-loop owned; keep ISR stack headroom. */
     snapshot_ring = ring_control;
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.20.1 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
+        "#CAM FW=0.21.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -256,6 +257,17 @@ static void assistant_send_image(void)
         (int)track_result.bottom_error, (unsigned int)track_result.bottom_valid);
     if (prefix_length <= 0 || (uint32_t)prefix_length >= CAMERA_DIAGNOSTIC_SIZE)
         return;
+    /* Last automatic-stop evidence survives C13 restart; keep one #CAM line. */
+    int last_length=snprintf((char *)camera_tx_packet+prefix_length-2,
+        CAMERA_DIAGNOSTIC_SIZE-(uint32_t)prefix_length+2U,
+        " LSSEQ=%lu LST=%lu LSREASON=%u LSW=%u LSP=%u LSL=%d LSR=%d LSTARGET10=%d LSLPWM=%u LSRPWM=%u\r\n",
+        (unsigned long)snapshot_last_stop.sequence,(unsigned long)snapshot_last_stop.ms,
+        (unsigned)snapshot_last_stop.reason,(unsigned)snapshot_last_stop.wheels,
+        (unsigned)snapshot_last_stop.protection,(int)snapshot_last_stop.left,(int)snapshot_last_stop.right,
+        (int)(snapshot_last_stop.target*10.f),(unsigned)snapshot_last_stop.left_pwm,(unsigned)snapshot_last_stop.right_pwm);
+    if(last_length<=0 || (uint32_t)last_length>=CAMERA_DIAGNOSTIC_SIZE-(uint32_t)prefix_length+2U)
+        return;
+    prefix_length=prefix_length-2+last_length;
     memcpy(camera_tx_packet + prefix_length, header, sizeof(header));
 #if CAMERA_SEND_RAW
     // 到识别完成后才发包，使灰度快照和 TRACK/ERR/Q 诊断来自同一帧。
@@ -288,7 +300,7 @@ static void assistant_send_speed(uint32_t now)
     int32_t left_total = encoder_total_l, right_total = encoder_total_r;
     interrupt_global_enable(primask);
     int length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#SPD FW=0.20.1 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
+        "#SPD FW=0.21.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
         (unsigned long)now, (unsigned int)running, (unsigned int)protection,
         (unsigned int)full, (unsigned int)stop, (unsigned int)fault,
         (int)(target * 10.0f), (int)left, (int)right,
@@ -453,6 +465,26 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 118, "C12-  C15+     ");
     tft180_show_string(0, 134, motor_enabled ? "C13 SERVO ON  " : "C13 SERVO OFF ");
 #else
+    uint32_t stop_lock=interrupt_global_disable();
+    track_stop_snapshot_t last_stop=track_last_stop;
+    uint8_t stopped=(uint8_t)!motor_enabled;
+    interrupt_global_enable(stop_lock);
+    if(stopped && last_stop.sequence) {
+        const char *name=last_stop.reason==TRACK_STOP_NO_FEEDBACK ? "NOFB" :
+            last_stop.reason==TRACK_STOP_OVERSPEED ? "FAST" :
+            last_stop.reason==TRACK_STOP_ENCODER ? "ENC" :
+            last_stop.reason==TRACK_STOP_LOST ? "LOST" :
+            last_stop.reason==TRACK_STOP_STALE ? "STALE" :
+            last_stop.reason==TRACK_STOP_RING ? "RING" : "READY";
+        snprintf(line,sizeof(line),"LAST %s:%u P%u ",name,(unsigned)last_stop.wheels,(unsigned)last_stop.protection);
+        tft180_show_string(0,102,line);
+        snprintf(line,sizeof(line),"L%d R%d       ",(int)last_stop.left,(int)last_stop.right);
+        tft180_show_string(0,118,line);
+        snprintf(line,sizeof(line),"T%d C13:RUN    ",(int)last_stop.target);
+        tft180_show_string(0,134,line);
+        screen_stats_dirty=0;
+        return;
+    }
     const ring_control_state_t *ring_display=&screen_ring_snapshot;
     track_path_observation_t display_path=screen_track_result.ring.path[TRACK_PATH_NORMAL];
     if(screen_approach_source!=TRACK_PATH_NORMAL) display_path=screen_track_result.ring.approach_path;

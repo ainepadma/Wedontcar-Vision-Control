@@ -51,6 +51,7 @@ volatile uint8_t protection_enabled = AUTOMATIC_PROTECTION_DEFAULT;
 volatile uint8_t speed_full_enabled = 0;
 volatile uint8_t track_ready = 0;
 volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
+volatile track_stop_snapshot_t track_last_stop;
 volatile int16_t track_servo_tenths = 0;
 volatile uint8_t imu_device_status = IMU660RB_RESULT_ERROR;
 imu_navigation_state_t imu_navigation;
@@ -204,9 +205,10 @@ void PIT_IRQHandler(void)
                                                        SERVO_CALIBRATION_MIN,
                                                        SERVO_CALIBRATION_MAX);
 #else
-            speed_full_enabled = speed_mode_switch_state.enabled;
-            Pid_Reset(&speed_pid_l);
-            Pid_Reset(&speed_pid_r);
+            /* C15 is a one-shot RAM adjustment, no longer a LOW/FULL toggle.
+             * Init reloads TRACK_SPEED_STRAIGHT after power cycling. */
+            track_control.config.speed_straight += 10.0f;
+            speed_full_enabled = 0U;
 #endif
         }
         if (button_pressed)
@@ -338,6 +340,10 @@ void PIT_IRQHandler(void)
         // 架空时不依赖摄像头识别，也不让视觉转向改变两轮目标。
         output.servo_angle = SERVO_MOTOR_CENTER;
 #endif
+        /* Capture BEFORE PWM/targets are cleared. Does not change stop policy. */
+        track_stop_record(&track_last_stop,was_running,output.running,output.stop_reason,
+            motor_feedback_fault,protection_enabled,control_clock_ms,
+            encoder_data_1,encoder_data_2,speed_target,speed_pwm_l,speed_pwm_r);
         motor_enabled = output.running;
         motor_switch_state.enabled = output.running;
         track_ready = output.ready;

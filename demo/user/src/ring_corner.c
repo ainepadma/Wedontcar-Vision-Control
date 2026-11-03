@@ -207,6 +207,19 @@ static int extend(ring_corner_guide_t *g,unsigned side,unsigned h,unsigned w,con
 static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *g)
 {
     float sum=0,weight=0,ns=0,fs=0;unsigned n=0,nc=0,fc=0;uint8_t linked=1;
+    unsigned top=0,end=h;
+    if(g->clip_upper) {
+        top=h;
+        for(unsigned side=0;side<2;++side) if(g->boundary[side].valid) {
+            unsigned y=(unsigned)ceilf(fminf(g->boundary[side].y0,g->boundary[side].y1));
+            if(y<top) top=y;
+        }
+    }
+    if(top>=end || end-top<6U) return;
+    g->active_top=(uint16_t)top;g->active_end=(uint16_t)end;
+    unsigned span=end-top,zone=span/3U;
+    unsigned near_start=g->clip_upper ? end-zone : h*2U/3U;
+    unsigned far_end=g->clip_upper ? top+zone : h/3U;
     for(unsigned y=0;y<h;++y) {
         float l=b[0][y],r=b[1][y];int lv=valid(0,y),rv=valid(1,y);
         for(unsigned side=0;side<2;++side) {
@@ -217,7 +230,7 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
         int supported=lv || rv;
         if(!lv && l<=w*.04f) {l=0;lv=1;}
         if(!rv && r>=w*.96f) {r=w-1;rv=1;}
-        int ok=supported && lv && rv && r-l>w*.05f && l>=0 && r<w;
+        int ok=y>=top && supported && lv && rv && r-l>w*.05f && l>=0 && r<w;
         unsigned x=(unsigned)clamp((l+r)*.5f,0,w-1);
         if(ok && !im[y*w+x]) ok=0;
         unsigned index=0;
@@ -229,12 +242,12 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
             linked=(uint8_t)ok;
         }
         if(!ok) continue;
-        float wt=y>=h*2/3 ? 3.f : (y>=h/3 ? 2.f : 1.f);
+        float wt=y>=near_start ? 3.f : (y>=far_end ? 2.f : 1.f);
         sum+=x*wt;weight+=wt;++n;
-        if(y>=h*2/3) {ns+=x;++nc;}if(y<h/3) {fs+=x;++fc;}
+        if(y>=near_start) {ns+=x;++nc;}if(y<far_end) {fs+=x;++fc;}
     }
-    g->confidence=(uint8_t)(n*100U/h);
-    if(n*100U<h*50U || nc<h/8 || fc<3U || !weight) return;
+    g->confidence=(uint8_t)(n*100U/span);
+    if(n*100U<span*50U || nc<span/8U || fc<3U || !weight) return;
     g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
     g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
 }
@@ -349,10 +362,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         if(stage==2 && p.quality) segment(g,side,p.x,p.y,outer,h-1);
         if(stage==3 && v.quality) segment(g,other,v.x,v.y,b[other][h-2],h-1);
         if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);
-        if((stage==5 || stage==6) && f->a[other].quality) {
-            /* Prefer the actual black-tip vertex over the last scanline loss.
-             * The overlay A and the virtual boundary share the same endpoint. */
-            if(f->a[other].quality) bp=f->a[other];
+        if((stage==5 || stage==6) && bp.quality) {
             /* User's exit sketch: close the local mouth from its lower outer
              * corner to the REAL upper cross-boundary, not an image corner.
              * Probe one quarter of the near lane width inward, then search
@@ -373,6 +383,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
             float anchor=side ? fminf(b[side][h-2],w*.75f) : fmaxf(b[side][h-2],w*.25f);
             segment(g,side,v.x,v.y,anchor,h-1);
         }
+        if(stage==3 || stage==4) g->clip_upper=1;
         if(stage==6 || stage==5 || g->boundary[0].valid || g->boundary[1].valid) finish(im,h,w,g);
     }
     /* Preview starts at the recognized entry, never guesses a motion stage. */
@@ -442,15 +453,15 @@ void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ri
                 f->v[side]=vertex;f->v_reacquired|=(uint8_t)(1U<<side);
                 unsigned other=1U-side;
                 ring_corner_guide_t *g=&f->guide[ring_pdf_guide(3,side)];memset(g,0,sizeof(*g));
-                segment(g,other,vertex.x,vertex.y,b[other][f->rows-2],f->rows-1);finish(im,f->rows,f->cols,g);
+                g->clip_upper=1;segment(g,other,vertex.x,vertex.y,b[other][f->rows-2],f->rows-1);finish(im,f->rows,f->cols,g);
                 g=&f->guide[ring_pdf_guide(4,other)];memset(g,0,sizeof(*g));
-                segment(g,side,vertex.x,vertex.y,side ? f->cols-1.f : 0.f,f->rows-1);finish(im,f->rows,f->cols,g);
+                g->clip_upper=1;segment(g,side,vertex.x,vertex.y,side ? f->cols-1.f : 0.f,f->rows-1);finish(im,f->rows,f->cols,g);
                 g=&f->guide[ring_pdf_guide(7,side)];memset(g,0,sizeof(*g));
                 float anchor=side ? fminf(b[side][f->rows-2],f->cols*.75f) : fmaxf(b[side][f->rows-2],f->cols*.25f);
                 segment(g,side,vertex.x,vertex.y,anchor,f->rows-1);finish(im,f->rows,f->cols,g);
             }
         }
-        if(f->v[side].quality && !(f->v_reacquired&(1U<<side))) {s->v[side]=f->v[side];s->v_valid[side]=1;s->v_misses[side]=0;}
+        if(f->v[side].quality) {s->v[side]=f->v[side];s->v_valid[side]=1;s->v_misses[side]=0;}
         else if(s->v_misses[side]<3) ++s->v_misses[side];else s->v_valid[side]=0;
     }
     for(unsigned side=0;side<2;++side) {

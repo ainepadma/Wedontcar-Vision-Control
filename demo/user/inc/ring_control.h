@@ -29,6 +29,7 @@ typedef struct {
     uint8_t corner_stage,corner_guide_id,corner_guide_held,corner_have_guide;
     uint8_t vote_frames,vote_kind,vote_side,clear_frames,transition_frames,exit_gap_seen;
     uint8_t have_frame,have_tick,fault_resume_phase;
+    uint8_t bridge_seen,bridge_passed,exit_armed,bridge_clear_frames;
     uint32_t corner_frame_number,corner_guide_frame_number,corner_last_guide_ms;
     uint32_t last_frame_ms,last_tick_ms,event_started_ms,phase_started_ms,event_id;
     float yaw_progress_deg,travel_counts;

@@ -4,6 +4,7 @@
 #include "track_control.h"
 #include "imu_navigation.h"
 #include "ring_control.h"
+#include "track_stop_diagnostics.h"
 
 // 临时端点标定模式已关闭；设为1时电机强制为零，C12/C15以0.5度调节舵机。
 #define SERVO_CENTER_TEST_MODE 0
@@ -20,7 +21,8 @@
 // 编码器反号、无反馈和超速保护始终有效，C13手动停机和PWM硬限幅始终保留。
 #define PROTECTION_TOGGLE_KEY C14
 #define AUTOMATIC_PROTECTION_DEFAULT 0U
-// C15 / KEY_1 切换低速/全速；上电默认低速。
+// C15 / KEY_1 每按一次将普通档直道目标增加10.0f；重启恢复TRACK_SPEED_STRAIGHT。
+// 沿用旧宏名用于GPIO初始化；不再切换全速档，长按不连加。
 #define SPEED_MODE_TOGGLE_KEY C15
 extern volatile uint8_t motor_enabled;
 extern volatile uint8_t motor_feedback_fault; // 1=左、2=右、3=两侧；原因见 track_stop_reason
@@ -28,6 +30,7 @@ extern volatile uint8_t protection_enabled;
 extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
 extern volatile uint8_t track_stop_reason;
+extern volatile track_stop_snapshot_t track_last_stop;
 extern volatile int32_t encoder_total_l, encoder_total_r;
 extern volatile int16_t track_servo_tenths;
 extern imu_navigation_state_t imu_navigation;

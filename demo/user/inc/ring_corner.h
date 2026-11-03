@@ -37,6 +37,8 @@ typedef struct {
 typedef struct {
     int16_t error,heading; /* Same units/sign as ordinary track_path_observation_t. */
     uint8_t valid,confidence;
+    uint8_t clip_upper;
+    uint16_t active_top,active_end;
     ring_corner_line_t boundary[2]; /* LEFT/RIGHT virtual segments, not centers. */
     uint8_t corner_side,corner_kind;
     float corner_x,corner_y;
