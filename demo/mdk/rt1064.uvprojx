@@ -415,6 +415,11 @@
               <FilePath>..\user\src\track_control.c</FilePath>
             </File>
             <File>
+              <FileName>steering_log.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\user\src\steering_log.c</FilePath>
+            </File>
+            <File>
               <FileName>imu_navigation.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\user\src\imu_navigation.c</FilePath>

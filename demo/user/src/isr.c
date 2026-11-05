@@ -37,6 +37,7 @@
 #include "isr.h"
 #include "main.h"
 #include "motor_switch.h"
+#include "steering_log.h"
 #include "zf_device_imu660rb.h"
 
 int16 encoder_data_1 = 0;
@@ -68,6 +69,8 @@ static motor_overspeed_watchdog_t motor_overspeed_watchdog;
 static track_control_state_t track_control;
 static volatile uint32_t control_clock_ms;
 static uint32_t consumed_frame_generation;
+static int16_t log_path_error, log_path_heading;
+static uint8_t log_path_confidence;
 
 // 主循环只发布观测，中断独占控制器、PID 和 PWM，防止停机后被旧帧重新写入。
 static volatile struct
@@ -80,7 +83,7 @@ static volatile struct
     uint8_t confidence, valid, ring_candidate;
     int8_t ring_direction;
     track_ring_observation_t ring;
-    uint32_t observed_ms, generation;
+    uint32_t observed_ms, generation, frame_number;
 } track_mailbox;
 
 void track_runtime_init(void)
@@ -121,6 +124,7 @@ void track_frame_publish(const track_vision_result_t *result)
     // 临界区复制结构化观测和候选路径；不复制像素、不计算几何或执行IO。
     uint32_t primask = interrupt_global_disable();
     track_mailbox.error = result->error;
+    track_mailbox.frame_number = result->frame_number;
     track_mailbox.heading = result->heading;
     track_mailbox.near_error = result->near_error;
     track_mailbox.near_heading = result->near_heading;
@@ -223,6 +227,7 @@ void PIT_IRQHandler(void)
             {
                 ring_control_init(&ring_control); // C13 starts a new run: clear faults and 270/360 completion records
                 track_control_toggle(&track_control, control_clock_ms);
+                steering_log_start();
             }
         }
 
@@ -321,6 +326,9 @@ void PIT_IRQHandler(void)
                                     ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
                                   path.confidence, path.valid,
                                   fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
+            log_path_error = path.error;
+            log_path_heading = path.heading;
+            log_path_confidence = path.confidence;
             track_control_observe_bottom(&track_control, track_mailbox.bottom_error,
                 (uint8_t)(fresh_ring_frame && track_mailbox.bottom_valid &&
                           ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
@@ -329,6 +337,8 @@ void PIT_IRQHandler(void)
         if (protection_enabled && ring_control.fault)
             track_control_stop(&track_control, TRACK_STOP_RING);
         track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
+        if (ring_control_straight_active(&ring_control, control_clock_ms))
+            track_control_force_straight(&track_control, &output);
         if (ring_control_guidance_active(&ring_control) &&
             output.target_speed > TRACK_SPEED_CURVE_MIN)
             output.target_speed = TRACK_SPEED_CURVE_MIN;
@@ -389,6 +399,7 @@ void PIT_IRQHandler(void)
             speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
         }
 
+        float log_target_left = 0.0f, log_target_right = 0.0f;
         if (motor_enabled)
         {
 #if SERVO_CENTER_TEST_MODE
@@ -412,6 +423,8 @@ void PIT_IRQHandler(void)
                 (output.servo_angle - SERVO_MOTOR_CENTER) * SERVO_DIR);
             const float target_left = target_counts + differential;
             const float target_right = target_counts - differential;
+            log_target_left = target_left;
+            log_target_right = target_right;
             speed_pwm_l = PidLocCtrl(&speed_pid_l, target_left - speed_real_l, 1.f);
             // 最终驱动防线仍保留非负/硬件满量程限制，并同步内部输出状态。
             speed_pwm_l = constrain_float(speed_pwm_l, 0.0f, speed_OUTMAX);
@@ -436,6 +449,24 @@ void PIT_IRQHandler(void)
             speed_pwm_l = speed_pwm_r = speed_pwm = 0.0f;
         }
 
+        /* Capture applied outputs only; numeric snapshot, no serial/file IO. */
+        const steering_log_record_t log_record = {
+            control_clock_ms, track_mailbox.frame_number,
+            (uint32_t)(control_clock_ms - track_mailbox.observed_ms),
+            log_path_error, log_path_heading, track_mailbox.near_error,
+            track_mailbox.near_heading, track_mailbox.bottom_error,
+            (int16_t)track_control.filtered_error, (int16_t)track_control.filtered_heading,
+            track_servo_tenths, (int16_t)(log_target_left * 10.0f),
+            (int16_t)(log_target_right * 10.0f), encoder_data_1, encoder_data_2,
+            (int16_t)speed_pwm_l, (int16_t)speed_pwm_r,
+            motor_enabled, track_ready, track_stop_reason, log_path_confidence,
+            track_control.frame_valid, ring_control.phase, ring_control.kind, protection_enabled,
+            ring_control.corner_stage, ring_control.corner_guide_id,
+            ring_control_path_source(&ring_control), ring_control.direction,
+            ring_control.bridge_seen, ring_control.bridge_passed,
+            ring_control.exit_armed, ring_control.transition_frames
+        };
+        steering_log_tick(&log_record);
         pit_flag_clear(PIT_CH0);
     }
 

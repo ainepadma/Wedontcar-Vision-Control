@@ -71,8 +71,8 @@ void track_frame_publish(const track_vision_result_t *result);
 // 舵机参数设置
 #define SERVO_MOTOR_PWM (PWM4_MODULE2_CHA_C30) // 定义主板上舵机对应引脚
 #define SERVO_MOTOR_FREQ (50)                  // 定义主板上舵机频率  请务必注意范围 50-300
-#define SERVO_MOTOR_L_MAX (98.5f)  // 实车标定的左侧安全端点
-#define SERVO_MOTOR_R_MAX (75.5f)  // 实车标定的右侧安全端点
+#define SERVO_MOTOR_L_MAX (100.0f) // 中值 +13°，本次软件端点，待实车验证
+#define SERVO_MOTOR_R_MAX (74.0f)  // 中值 -13°，本次软件端点，待实车验证
 // 实车按键标定确认 87.0 度为机械正中。
 #define SERVO_MOTOR_CENTER (87.0f)
 #define SERVO_DIR (SERVO_MOTOR_L_MAX>SERVO_MOTOR_R_MAX?-1.f:1.f) // 根据左右duty的大小自动决定舵机方向

@@ -57,6 +57,10 @@ enum {
 
 typedef struct {
     track_path_observation_t path[TRACK_PATH_COUNT];
+    /* Current-frame inputs used when handing a ring route back to normal
+     * control. Keep distinct from legacy topology/near-center diagnostics. */
+    int16_t handoff_near_error,handoff_near_heading,handoff_bottom_error;
+    uint8_t handoff_near_valid,handoff_bottom_valid;
     /* Pre-entry corridor only; source names the trusted edge, not turn direction. */
     track_path_observation_t approach_path;
     uint8_t approach_source, approach_reject;

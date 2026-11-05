@@ -9,11 +9,11 @@
 #define TRACK_STALE_MS 150U
 #define TRACK_MAX_FORWARD_TIME UINT32_C(0x7fffffff)
 /* 远处走向的前瞻权重：降低航向影响，几何识别范围保持不变。 */
-#define TRACK_HEADING_WEIGHT 0.80
+#define TRACK_HEADING_WEIGHT 0.40
 /* 只影响“弯还没到近处”这个阶段：近处一旦出现弯（aligned=1），
  * heading_weight 会升到 TRACK_HEADING_WEIGHT，弯中转向强度不受这里影响。
  * 0.55 时入弯偏早，降到 0.35 把前瞻压下来；仍偏早就再降，弯中拐不动请调 KP 而不是这里。 */
-#define TRACK_APPROACH_HEADING_WEIGHT 0.20
+#define TRACK_APPROACH_HEADING_WEIGHT 0.05
 #define TRACK_NEAR_BEND_START 30.0
 #define TRACK_NEAR_BEND_FULL 120.0
 #define TRACK_BEND_P_BOOST 0.40
@@ -264,6 +264,16 @@ void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled)
         else if (!state->frame_valid)
             track_control_stop(state, TRACK_STOP_LOST);
     }
+}
+
+void track_control_force_straight(track_control_state_t *state,track_control_output_t *output)
+{
+    if(!state || !output || !state->running || !output->running) return;
+    state->servo_angle=state->config.servo_center;
+    output->servo_angle=state->servo_angle;
+    state->filtered_error=0.0f;state->filtered_heading=0.0f;state->filtered_near_heading=0.0f;
+    state->near_geometry_valid=0U;state->derivative=0.0f;state->derivative_ready=0U;
+    state->bottom_active=0U;state->bottom_votes=0U;state->bottom_center_votes=0U;
 }
 
 track_control_output_t track_control_tick(track_control_state_t *state,

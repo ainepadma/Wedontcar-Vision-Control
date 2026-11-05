@@ -623,6 +623,11 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     memset(out->guide_valid,0,sizeof(out->guide_valid));
     memset(out->approach_valid,0,sizeof(out->approach_valid));
     out->ring.path[0]=(track_path_observation_t){out->error,out->heading,out->valid,out->confidence};
+    out->ring.handoff_near_error=out->near_error;
+    out->ring.handoff_near_heading=out->near_heading;
+    out->ring.handoff_near_valid=out->near_geometry_valid;
+    out->ring.handoff_bottom_error=out->bottom_error;
+    out->ring.handoff_bottom_valid=out->bottom_valid;
     out->ring_candidate=0;out->ring_direction=0;
     if(!RING_FEATURE_ENABLED) return;
     ring_corner_process(binary,rows,cols,0,&out->ring.corners);
