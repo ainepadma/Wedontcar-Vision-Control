@@ -1,6 +1,7 @@
 #include "main.h" // 所有引脚信息更改在main.h里改宏
 #include "zf_device_imu660rb.h"
 #include <math.h>
+#include "steering_log.h"
 
 // 暗部增强及地面区域阈值；上方灯光与底部车体不参与阈值估计。
 // C13 控制启停；赛道版 C14 默认关闭视觉保护，编码器保护始终有效。
@@ -118,11 +119,13 @@ static char screen_path_source='N';
 static uint8_t camera_tx_packet[CAMERA_DIAGNOSTIC_SIZE + 12U + sizeof(image)];
 static volatile uint32_t camera_tx_position;
 static volatile uint32_t camera_tx_length;
+static uint8_t log_export_state;
+static uint32_t log_export_session, log_export_count, log_export_index, log_export_hash;
 #if CAMERA_SEND_RAW
 static uint8_t camera_snapshot_ready;
 static void assistant_prepare_raw_image(void)
 {
-    if (camera_tx_length == 0U && !camera_snapshot_ready)
+    if (!log_export_state && camera_tx_length == 0U && !camera_snapshot_ready)
     {
         memcpy(camera_tx_packet + CAMERA_DIAGNOSTIC_SIZE + 12U, image, sizeof(image));
         camera_snapshot_ready = 1;
@@ -132,6 +135,7 @@ static void assistant_prepare_raw_image(void)
 
 static void assistant_transport_cancel(void)
 {
+    log_export_state = 0U;
     uint32_t primask = interrupt_global_disable();
     LPUART_DisableInterrupts(LPUART1, kLPUART_TxDataRegEmptyInterruptEnable);
     camera_tx_position = 0U;
@@ -140,6 +144,93 @@ static void assistant_transport_cancel(void)
     camera_snapshot_ready = 0U;
 #endif
     interrupt_global_enable(primask);
+}
+
+static void log_queue(int length)
+{
+    if (length <= 0 || (uint32_t)length >= sizeof(camera_tx_packet)) return;
+    camera_tx_position = 0U;
+    __DMB();
+    camera_tx_length = (uint32_t)length;
+    LPUART_EnableInterrupts(LPUART1, kLPUART_TxDataRegEmptyInterruptEnable);
+}
+
+/* Main-loop export. Copy one frozen record under a short IRQ mask; format and
+ * transmit with interrupts enabled. A new C13 run invalidates the session. */
+static void steering_log_service(void)
+{
+    static char command[16];
+    static unsigned used;
+    static uint8_t overflow;
+    uint8_t bytes[32];
+    uint32_t n = debug_read_ring_buffer(bytes, sizeof(bytes));
+    for (uint32_t i=0U; i<n; ++i) {
+        if (bytes[i]=='\r') continue;
+        if (bytes[i]=='\n') {
+            command[used]='\0';
+            if (!overflow && !strcmp(command,"LOG") && screen_enabled) {
+                uint32_t mask=interrupt_global_disable();
+                steering_log_info_t info=steering_log_info();
+                uint8_t running=motor_enabled;
+                interrupt_global_enable(mask);
+                assistant_transport_cancel();
+                if (running || info.active || !info.count) {
+                    log_export_state=3U;
+                    log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),
+                        "\r\n#LOG ERROR %s\r\n",running || info.active ? "RUNNING" : "EMPTY"));
+                } else {
+                    log_export_session=info.session;
+                    log_export_count=info.count;
+                    log_export_index=0U;
+                    log_export_hash=2166136261U;
+                    log_export_state=1U;
+                    log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),
+                        "\r\n#LOG BEGIN %lu %lu %lu FW=0.25.0\r\n%s",
+                        (unsigned long)info.session,(unsigned long)info.count,
+                        (unsigned long)info.overwritten,steering_log_csv_header()));
+                }
+            } else if (!overflow && !strcmp(command,"LOG CANCEL")) {
+                assistant_transport_cancel();
+            }
+            used=0U; overflow=0U;
+        } else if (used < sizeof(command)-1U && !overflow) {
+            command[used++]=(char)bytes[i];
+        } else overflow=1U;
+    }
+    if (!log_export_state || camera_tx_length) return;
+    if (log_export_state==3U) { log_export_state=0U; return; }
+    uint32_t mask=interrupt_global_disable();
+    steering_log_info_t info=steering_log_info();
+    interrupt_global_enable(mask);
+    if (info.active || info.session!=log_export_session) {
+        log_export_state=3U;
+        log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),"#LOG ABORT RESTART\r\n"));
+        return;
+    }
+    if (log_export_index==log_export_count) {
+        log_export_state=3U;
+        log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),
+            "#LOG END %lu %lu %lu\r\n",(unsigned long)log_export_session,
+            (unsigned long)log_export_count,(unsigned long)log_export_hash));
+        return;
+    }
+    steering_log_record_t record;
+    mask=interrupt_global_disable();
+    int ok=steering_log_read(log_export_session,log_export_index,&record);
+    interrupt_global_enable(mask);
+    if (!ok) return; /* next loop emits ABORT */
+    int length=steering_log_csv((char *)camera_tx_packet,sizeof(camera_tx_packet),&record);
+    if (length<=0 || (uint32_t)length>=sizeof(camera_tx_packet)) {
+        log_export_state=3U;
+        log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),"#LOG ABORT FORMAT\r\n"));
+        return;
+    }
+    for (int i=0;i<length;++i) {
+        log_export_hash^=camera_tx_packet[i];
+        log_export_hash*=16777619U;
+    }
+    ++log_export_index;
+    log_queue(length);
 }
 
 void assistant_uart_tx_irq_handler(void)
@@ -165,6 +256,7 @@ void assistant_uart_tx_irq_handler(void)
 // 与官方 seekfree_assistant_camera_config / camera_send 的线格式一致。
 static void assistant_send_image(void)
 {
+    if (log_export_state) return;
     if (camera_tx_length != 0U)
         return;
 #if CAMERA_SEND_RAW
@@ -200,7 +292,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.21.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
+        "#CAM FW=0.25.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -287,6 +379,7 @@ static void assistant_send_image(void)
 // 架空调速只发短文本，避免灰度图把10ms速度环采样拖成约4秒一条。
 static void assistant_send_speed(uint32_t now)
 {
+    if (log_export_state) return;
     static uint32_t last_ms;
     if ((uint32_t)(now - last_ms) < 50U || camera_tx_length != 0U)
         return;
@@ -300,7 +393,7 @@ static void assistant_send_speed(uint32_t now)
     int32_t left_total = encoder_total_l, right_total = encoder_total_r;
     interrupt_global_enable(primask);
     int length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#SPD FW=0.21.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
+        "#SPD FW=0.25.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
         (unsigned long)now, (unsigned int)running, (unsigned int)protection,
         (unsigned int)full, (unsigned int)stop, (unsigned int)fault,
         (int)(target * 10.0f), (int)left, (int)right,
@@ -325,6 +418,7 @@ static void assistant_send_speed(uint32_t now)
 #endif
 static void assistant_send_scope(uint32_t now)
 {
+    if (log_export_state) return;
     static uint32_t last_ms;
     if ((uint32_t)(now - last_ms) < 20U || camera_tx_length != 0U)
         return;
@@ -497,10 +591,26 @@ static void screen_draw_stats(void)
         (screen_path_source=='H' || screen_path_source=='?' ? screen_path_source : ' '),
         /* H is a historical held path; ? is a control/image frame mismatch. */
         (int)display_path.error,(int)display_path.heading);
+    if(ring_display->kind==TRACK_RING_360 && ring_display->corner_stage==7) {
+        unsigned outer=ring_display->direction==1 ? 1U : 0U;
+        const ring_corner_frame_t *frame=&screen_track_result.ring.corners;
+        if(frame->frame_number==ring_display->corner_frame_number &&
+           (frame->border_angle_valid&(1U<<outer))) {
+            int angle=outer ? frame->border_angle10[outer] : 1800-frame->border_angle10[outer];
+            snprintf(line,sizeof(line),"%cE%4d O%3d   ",motor_enabled ? 'C' : 'P',
+                     (int)display_path.error,(angle+5)/10);
+        } else snprintf(line,sizeof(line),"%cE%4d O---   ",motor_enabled ? 'C' : 'P',(int)display_path.error);
+    }
     tft180_show_string(0, 102, line);
-    snprintf(line, sizeof(line), "L%u R%u S%u G%u %c  ",
-        (unsigned int)screen_track_result.ring.corners.count[0],(unsigned int)screen_track_result.ring.corners.count[1],
-        (unsigned int)ring_display->corner_stage,(unsigned int)screen_guide_id,screen_path_source);
+    /* C identifies actual control diagnostics, P a stopped preview.
+     * Never report screen_guide_id=0 as control fallback merely because the
+     * displayed image differs from the control frame or the guide is held. */
+    static const char sources[]="NGHUT";
+    snprintf(line, sizeof(line), "%c S%u G%02u %c A%u ", motor_enabled ? 'C' : 'P',
+        (unsigned int)ring_display->corner_stage,
+        (unsigned int)(motor_enabled ? ring_display->corner_guide_id : screen_guide_id),
+        motor_enabled ? sources[ring_control_path_source(ring_display)] : screen_path_source,
+        (unsigned int)ring_display->exit_armed);
     tft180_show_string(0, 118, line);
     if (motor_feedback_fault)
     {
@@ -514,7 +624,10 @@ static void screen_draw_stats(void)
         tft180_show_string(0, 134, "RING FAULT     ");
     else if (motor_enabled && ring_display->action_locked)
     {
-        snprintf(line, sizeof(line), "%u %s ",ring_display->kind==TRACK_RING_270 ? 270U : 360U,
+        if(ring_display->kind==TRACK_RING_360)
+            snprintf(line,sizeof(line),"360 S%u %-8s",(unsigned int)ring_display->corner_stage,
+                     ring_display->exit_straight_active ? "STRAIGHT" : ring_control_stage_name(ring_display->corner_stage));
+        else snprintf(line, sizeof(line), "%u %s ",270U,
             ring_display->corner_guide_held ? "HOLD    " :
             (ring_display->phase==RING_STATE_INSIDE ? "INSIDE  " :
              (ring_display->corner_guide_id==RING_GUIDE_270_CONNECT ? "CONNECT " : "GUIDE   ")));
@@ -602,6 +715,11 @@ static void screen_draw_track_overlay(void)
         screen_path_source='H';
     } else if(!state->fault && !same_frame) {
         screen_path_source='?';
+    } else if(!state->fault && state->exit_straight_active) {
+        screen_path_source='T';
+    } else if(!state->fault && state->kind==TRACK_RING_360 && state->corner_stage==7 &&
+              state->action_locked && state->selected_path.valid && !state->corner_have_guide) {
+        screen_path_source='N';
     } else if(!state->fault && !state->action_locked && approach_valid &&
               state->path_mode==screen_track_result.ring.approach_source) {
         screen_approach_source=screen_track_result.ring.approach_source;
@@ -623,7 +741,10 @@ static void screen_draw_track_overlay(void)
         /* The approach array belongs to this image; rejected rows stay gaps. */
         if(screen_approach_source!=TRACK_PATH_NORMAL && screen_track_result.approach_valid[row])
             screen_point((float)screen_track_result.approach_center[row],(float)row,RGB565_GREEN);
-        else if(screen_guide_id==RING_GUIDE_NONE && screen_track_result.row_valid[row])
+        else if(screen_guide_id==RING_GUIDE_NONE && screen_path_source!='H' &&
+                !(state->action_locked && state->kind==TRACK_RING_360 &&
+                  (state->corner_stage==3 || (state->corner_stage==7 && screen_path_source!='N'))) &&
+                screen_track_result.row_valid[row])
             screen_point((float)screen_track_result.center[row],(float)row,RGB565_GREEN);
     }
     for(unsigned side=0U;side<2U;++side) for(unsigned i=0U;i<corners->count[side] && i<RING_CORNER_MAX_PER_SIDE;++i) {
@@ -709,6 +830,7 @@ int main(void)
     while (1)
     {
         uint32_t now = timer_get(GPT_TIM_1);
+        steering_log_service();
 #if SPEED_BENCH_MODE
 #if SPEED_SCOPE_MODE
         assistant_send_scope(now);

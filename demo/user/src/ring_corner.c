@@ -21,6 +21,20 @@ static int white(const uint8_t *im,unsigned h,unsigned w,int x,int y)
 }
 unsigned ring_pdf_guide(unsigned stage,unsigned side)
 {return RING_GUIDE_PDF_BASE+(stage-1U)*2U+side;}
+static void exit_white_band(const uint8_t *im,unsigned h,unsigned w,ring_corner_frame_t *f)
+{
+    unsigned run=0,required=(h*RING_EXIT_WHITE_BAND_PERCENT+99U)/100U;
+    for(unsigned y=0;y<h;++y) {
+        unsigned x=0;
+        while(x<w && im[y*w+x]) ++x;
+        run=x==w ? run+1U : 0U;
+        if(run>=required) {
+            f->exit_white_band=1;
+            f->exit_white_top=(uint16_t)(y+1U-run);
+            f->exit_white_bottom=(uint16_t)y;
+        }
+    }
+}
 static void trace(const uint8_t *im,unsigned h,unsigned w,unsigned side,int x,int y,ring_corner_frame_t *f)
 {
     unsigned n=0;int px=-1,py=-1;
@@ -45,6 +59,47 @@ static ring_corner_point_t point(float x,float y,unsigned kind)
     ring_corner_point_t p;memset(&p,0,sizeof(p));p.x=x;p.y=y;p.kind=(uint8_t)kind;p.quality=90;return p;
 }
 static int valid(unsigned side,unsigned y){return (flags[y]&(1U<<side))!=0;}
+static void border_angles(unsigned h,unsigned w,ring_corner_frame_t *f)
+{
+    /* Fit only the longest uninterrupted real border in 55%-90% of the
+     * native image. Missing/edge rows and large jumps split the support.
+     * A high coverage score elsewhere must not make a curved fit valid. */
+    unsigned first=h*55U/100U,last=h*90U/100U;
+    unsigned min_span=(h*20U+99U)/100U,jump=w/40U;
+    if(jump<2U) jump=2U;
+    for(unsigned side=0;side<2U;++side) {
+        unsigned start=first,count=0,best_start=0,best_count=0;
+        for(unsigned y=first;y<=last;++y) {
+            int supported=valid(side,y) && b[side][y]>0U && b[side][y]+1U<w;
+            if(!supported) {count=0;continue;}
+            if(!count || abs((int)b[side][y]-(int)b[side][y-1U])>(int)jump) {
+                start=y;count=1U;
+            } else ++count;
+            if(count>=best_count) {best_start=start;best_count=count;}
+        }
+        if(best_count<8U || best_count-1U<min_span) continue;
+        float n=(float)best_count,sy=0.f,sx=0.f,syy=0.f,sxy=0.f;
+        /* Local y keeps the least-squares sums small at full sensor size. */
+        for(unsigned i=0;i<best_count;++i) {
+            float y=(float)i,x=(float)b[side][best_start+i];
+            sy+=y;sx+=x;syy+=y*y;sxy+=y*x;
+        }
+        float den=n*syy-sy*sy;
+        if(den<=0.f) continue;
+        float k=(n*sxy-sy*sx)/den,c=(sx-k*sy)/n;
+        float max_error=0.f,sum_error2=0.f;
+        float tolerance=fminf(3.f,fmaxf(1.5f,w*.01f));
+        for(unsigned i=0;i<best_count;++i) {
+            float error=fabsf(b[side][best_start+i]-(k*i+c));
+            max_error=fmaxf(max_error,error);sum_error2+=error*error;
+        }
+        if(max_error>tolerance || sum_error2>n*tolerance*tolerance*.25f) continue;
+        float angle=atan2f(1.f,k)*572.95779513f;
+        if(!isfinite(angle) || angle<0.f || angle>1800.f) continue;
+        f->border_angle10[side]=(int16_t)(angle+.5f);
+        f->border_angle_valid|=(uint8_t)(1U<<side);
+    }
+}
 static void features(unsigned h,unsigned w,unsigned side,ring_corner_frame_t *f)
 {
     unsigned q=0,good=0,total=0,near_good=0,jump=w/12U+2U,rad=h/20U+2U;
@@ -251,8 +306,30 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
     g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
     g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
 }
-/* Entry P must belong to an island with a visible outer white flank.
- * A crest on the image roof/background stripe is not an island point. */
+static void exit_diagonal(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
+                          const ring_corner_frame_t *f,ring_corner_guide_t *g)
+{
+    if(!f->exit_white_band) return;
+    unsigned side=1U-inner;
+    const ring_corner_point_t *a=&f->a[side];
+    float angle=RING_EXIT_LINE_ANGLE_DEG;
+    if(a->kind!=RING_CORNER_A || a->quality<RING_CORNER_MIN_QUALITY || !isfinite(a->x) || !isfinite(a->y) ||
+       a->x<0.f || a->x>w-1.f || a->y<0.f || a->y>h-1.f ||
+       !isfinite(angle) || angle<=0.f || angle>=90.f) return;
+    float slope=tanf(angle*0.01745329251994329577f);
+    float x=a->x,y=a->y;
+    /* Anchor is the actual opposite-side A, never the white-band row or an
+     * image corner. Clip distance along the ray so the requested angle and
+     * starting point both remain exact when the ray meets a side edge. */
+    float span=fminf(y,(side ? x : w-1.f-x)/slope);
+    if(span<2.f) return;
+    segment(g,side,x,y,clamp(x+(side ? -span : span)*slope,0.f,w-1.f),y-span);
+    g->clip_upper=1;g->corner_side=(uint8_t)side;g->corner_kind=RING_CORNER_A;
+    g->corner_x=x;g->corner_y=y;
+    finish(im,h,w,g);
+}
+/* Entry P needs a supported black component, not a tiny speck or the entire
+ * background. Edge contact is independently configurable for partial islands. */
 #define ISLAND_QUEUE 8192U
 static uint32_t island_queue[ISLAND_QUEUE];
 static uint8_t island_seen[(480U*752U+7U)/8U];
@@ -270,11 +347,15 @@ static int island_point(const uint8_t *im,unsigned h,unsigned w,unsigned side,co
     unsigned min_y=(unsigned)y,max_y=(unsigned)y;
     while(head<tail) {
         uint32_t pos=island_queue[head++];unsigned cy=pos/w,cx=pos%w;
+#if RING_ENTRY_REQUIRE_CLOSED_ISLAND
         if(cx==0 || cy==0 || cx+1==w || cy+1==h) return 0;
+#endif
         if(cy<min_y) min_y=cy;
         if(cy>max_y) max_y=cy;
         for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
-            uint32_t next=(uint32_t)((int)cy+dy)*w+(unsigned)((int)cx+dx);
+            int nx=(int)cx+dx,ny=(int)cy+dy;
+            if(nx<0 || ny<0 || nx>=(int)w || ny>=(int)h) continue;
+            uint32_t next=(uint32_t)ny*w+(unsigned)nx;
             uint8_t bit=(uint8_t)(1U<<(next%8U));
             if(!im[next] && !(island_seen[next/8U]&bit)) {
                 if(tail>=ISLAND_QUEUE) return 0;
@@ -282,8 +363,8 @@ static int island_point(const uint8_t *im,unsigned h,unsigned w,unsigned side,co
             }
         }
     }
-    /* Actual island: enclosed black component, not the outer bend/background.
-     * Bounded queue overflow rejects an ambiguous entry rather than wrapping. */
+    /* Preserve minimum area/height and bounded maximum area even when an
+     * otherwise supported partial island touches the image edge. */
     return tail>=w*h/400U && max_y-min_y>=h/20U;
 }
 void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corner_context_t *ctx,ring_corner_frame_t *f)
@@ -291,6 +372,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
     (void)ctx;if(!f) return;memset(f,0,sizeof(*f));
     if(!im || h<20 || h>480 || w<32 || w>752) return;
     f->rows=h;f->cols=w;f->detector_near_row=h-2;
+    exit_white_band(im,h,w,f);
     memset(f->border_index,255,sizeof(f->border_index));memset(flags,0,sizeof(flags));
     float anchor=(w-1)*.5f;int seed[2]={0,w-1},seed_y=h-2;
     for(int y=h-2;y>=0;--y) {
@@ -314,6 +396,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         }
     }
     b[0][h-1]=b[0][h-2];b[1][h-1]=b[1][h-2];flags[h-1]=flags[h-2];
+    border_angles(h,w,f);
     for(unsigned side=0;side<2;++side) {
         trace(im,h,w,side,seed[side],seed_y,f);features(h,w,side,f);
     }
@@ -327,9 +410,14 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
     if(f->v[1].quality && f->v[1].x<w*.45f) {f->v[0]=f->v[1];memset(&f->v[1],0,sizeof(f->v[1]));}
     f->paired=(uint8_t)(!f->bottom_open[0] && !f->bottom_open[1]);
     f->road_clear=(uint8_t)(f->paired && !f->gap[0] && !f->gap[1] && f->quality[0]>65 && f->quality[1]>65);
-    for(unsigned side=0;side<2;++side)
+    for(unsigned side=0;side<2;++side) {
+        float ap_gap=f->a[side].y-f->p[side].y;
         f->entry[side]=(uint8_t)(f->gap[side] && f->a[side].quality && f->p[side].quality &&
-            f->p[side].y+h*.22f<f->a[side].y && island_point(im,h,w,side,&f->p[side]) && f->continuous[1-side] && !f->gap[1-side]);
+            ap_gap>0.f && ap_gap*100.f>=h*RING_ENTRY_AP_MIN_GAP_PERCENT &&
+            ap_gap*100.f<=h*RING_ENTRY_AP_MAX_GAP_PERCENT &&
+            island_point(im,h,w,side,&f->p[side]) &&
+            f->continuous[1-side] && !f->gap[1-side]);
+    }
     for(unsigned side=0;side<2;++side) mouth(side,h,w,f);
     f->paired_mouth=(uint8_t)(f->mouth_lower[0].quality && f->mouth_lower[1].quality &&
         fabsf(f->mouth_lower[0].y-f->mouth_lower[1].y)<h*.20f &&
@@ -362,7 +450,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         if(stage==2 && p.quality) segment(g,side,p.x,p.y,outer,h-1);
         if(stage==3 && v.quality) segment(g,other,v.x,v.y,b[other][h-2],h-1);
         if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);
-        if((stage==5 || stage==6) && bp.quality) {
+        if(stage==5 && bp.quality) {
             /* User's exit sketch: close the local mouth from its lower outer
              * corner to the REAL upper cross-boundary, not an image corner.
              * Probe one quarter of the near lane width inward, then search
@@ -377,12 +465,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
             }
             if(roof>1 && roof<bp.y-3) segment(g,other,x,roof,bp.x,bp.y);
         }
-        if(stage==7 && v.quality) {
-            /* Second visit: the SAME sharp V now closes the inner boundary.
-             * Keep the lower anchor inside the visible incoming white road. */
-            float anchor=side ? fminf(b[side][h-2],w*.75f) : fmaxf(b[side][h-2],w*.25f);
-            segment(g,side,v.x,v.y,anchor,h-1);
-        }
+        if(stage==6 || stage==7) {exit_diagonal(im,h,w,side,f,g);continue;}
         if(stage==3 || stage==4) g->clip_upper=1;
         if(stage==6 || stage==5 || g->boundary[0].valid || g->boundary[1].valid) finish(im,h,w,g);
     }
@@ -456,9 +539,8 @@ void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ri
                 g->clip_upper=1;segment(g,other,vertex.x,vertex.y,b[other][f->rows-2],f->rows-1);finish(im,f->rows,f->cols,g);
                 g=&f->guide[ring_pdf_guide(4,other)];memset(g,0,sizeof(*g));
                 g->clip_upper=1;segment(g,side,vertex.x,vertex.y,side ? f->cols-1.f : 0.f,f->rows-1);finish(im,f->rows,f->cols,g);
-                g=&f->guide[ring_pdf_guide(7,side)];memset(g,0,sizeof(*g));
-                float anchor=side ? fminf(b[side][f->rows-2],f->cols*.75f) : fmaxf(b[side][f->rows-2],f->cols*.25f);
-                segment(g,side,vertex.x,vertex.y,anchor,f->rows-1);finish(im,f->rows,f->cols,g);
+                /* S7 is white-band based; a recovered V cannot replace its
+                 * opposite-side diagonal with the obsolete inner-side line. */
             }
         }
         if(f->v[side].quality) {s->v[side]=f->v[side];s->v_valid[side]=1;s->v_misses[side]=0;}

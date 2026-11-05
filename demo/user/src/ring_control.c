@@ -7,6 +7,7 @@ void ring_control_init(ring_control_state_t *s)
 static void fail(ring_control_state_t *s)
 {
     s->selected_path=invalid();s->line_active=0;
+    s->exit_straight_active=0;s->exit_straight_done=1;s->exit_angle_frames=0;
     if(s->protection_enabled) {s->fault_resume_phase=s->phase;s->phase=RING_STATE_FAULT;s->fault=1;}
 }
 void ring_control_set_protection(ring_control_state_t *s,uint8_t enabled)
@@ -17,6 +18,35 @@ void ring_control_set_protection(ring_control_state_t *s,uint8_t enabled)
 }
 uint8_t ring_control_guidance_active(const ring_control_state_t *s)
 {return (uint8_t)(RING_FEATURE_ENABLED && s && s->action_locked && !s->fault);}
+uint8_t ring_control_path_source(const ring_control_state_t *s)
+{
+    if(!s || s->fault || !s->selected_path.valid) return RING_SOURCE_INVALID;
+    if(s->exit_straight_active) return RING_SOURCE_STRAIGHT;
+    if(s->corner_guide_held) return RING_SOURCE_HOLD;
+    return s->line_active && s->corner_guide_id ? RING_SOURCE_GUIDE : RING_SOURCE_NORMAL;
+}
+uint8_t ring_control_straight_active(const ring_control_state_t *s,uint32_t now)
+{
+    return (uint8_t)(RING_FEATURE_ENABLED && s && s->action_locked && !s->fault &&
+        s->kind==TRACK_RING_360 && s->corner_stage==7 && s->exit_straight_active &&
+        (uint32_t)(now-s->exit_straight_started_ms)<RING_EXIT_STRAIGHT_MS &&
+        s->have_frame && (uint32_t)(now-s->last_frame_ms)<=RING_VISION_STALE_MS);
+}
+static void cancel_straight(ring_control_state_t *s)
+{
+    s->exit_straight_active=0;s->exit_straight_done=1;
+    s->exit_road_frames=0;s->transition_frames=0;
+    s->reset_tracking_history=1;s->control_refresh=1;
+}
+static void update_straight(ring_control_state_t *s,uint32_t now)
+{
+    if(s->exit_straight_active && !ring_control_straight_active(s,now)) cancel_straight(s);
+}
+const char *ring_control_stage_name(uint8_t value)
+{
+    static const char *const names[]={"IDLE","ENTRY","PREIN","INLOCK","JOIN","RING","EXITWAIT","EXIT"};
+    return value<8U ? names[value] : "INVALID";
+}
 float ring_control_line_x(const ring_control_state_t *s,float row)
 {(void)row;return s ? s->selected_path.error : 0.f;}
 void ring_control_360_motion(ring_control_state_t *s,float c,float l,float r,float speed,float *angle,float *out)
@@ -27,6 +57,7 @@ void ring_control_tick(ring_control_state_t *s,uint8_t running,uint8_t fresh,flo
     if(!RING_FEATURE_ENABLED) {ring_control_init(s);return;}
     unsigned dt=s->have_tick ? now-s->last_tick_ms : 0;s->last_tick_ms=now;s->have_tick=1;
     if(!running) {if(s->action_locked && !s->fault) ring_control_init(s);return;}
+    update_straight(s,now);
     /* Diagnostics only. No encoder or gyro thresholds advance visual states. */
     if(isfinite(distance) && distance>0) s->travel_counts+=distance;
     if(fresh && isfinite(rate) && dt<100) s->yaw_progress_deg+=rate*dt*.001f;
@@ -46,21 +77,59 @@ static int confirmed(ring_control_state_t *s,int condition)
     if(s->transition_frames<255) ++s->transition_frames;
     return s->transition_frames>=RING_CONFIRM_FRAMES;
 }
-static void complete(ring_control_state_t *s)
+static int exit_road_ready(const track_ring_observation_t *obs)
+{
+    const ring_corner_frame_t *f=&obs->corners;
+    const track_path_observation_t *p=&obs->path[TRACK_PATH_NORMAL];
+    if(obs->handoff_near_valid) {
+        int e=obs->handoff_near_error,h=obs->handoff_near_heading;
+        if(e<-RING_EXIT_ROAD_MAX_ERROR || e>RING_EXIT_ROAD_MAX_ERROR ||
+           h<-RING_EXIT_ROAD_MAX_HEADING || h>RING_EXIT_ROAD_MAX_HEADING) return 0;
+        if((p->error>RING_EXIT_NEAR_SIGN_DEADBAND && e<-RING_EXIT_NEAR_SIGN_DEADBAND) ||
+           (p->error<-RING_EXIT_NEAR_SIGN_DEADBAND && e>RING_EXIT_NEAR_SIGN_DEADBAND)) return 0;
+    }
+    if(obs->handoff_bottom_valid && (obs->handoff_bottom_error<-RING_EXIT_BOTTOM_MAX_ERROR ||
+       obs->handoff_bottom_error>RING_EXIT_BOTTOM_MAX_ERROR)) return 0;
+    return f->road_clear && !f->exit_white_band && !f->entry[0] && !f->entry[1] &&
+        !f->cross_entry && p->valid && p->confidence>=RING_EXIT_ROAD_MIN_CONFIDENCE &&
+        p->error>=-RING_EXIT_ROAD_MAX_ERROR && p->error<=RING_EXIT_ROAD_MAX_ERROR &&
+        p->heading>=-RING_EXIT_ROAD_MAX_HEADING && p->heading<=RING_EXIT_ROAD_MAX_HEADING;
+}
+static int exit_road_visible(const track_ring_observation_t *obs,unsigned inner)
+{
+    const track_path_observation_t *p=&obs->path[TRACK_PATH_NORMAL];
+    const ring_corner_guide_t *g=&obs->corners.guide[ring_pdf_guide(7,inner)];
+    return (p->valid && p->confidence>=45U) || (g->valid && g->confidence>=45U);
+}
+static void complete(ring_control_state_t *s,uint32_t now)
 {
     s->completed_mask|=s->kind==TRACK_RING_360 ? RING_DONE_360 : RING_DONE_270;
     if(s->kind==TRACK_RING_360) ++s->completed_360;else ++s->completed_270;
     s->action_locked=0;s->line_active=0;s->corner_guide_id=0;s->corner_stage=0;
-    s->phase=RING_STATE_COOLDOWN;s->clear_frames=0;s->vote_frames=0;s->reset_tracking_history=1;
+    s->phase=RING_STATE_COOLDOWN;s->clear_frames=0;s->vote_frames=0;s->transition_frames=0;s->reset_tracking_history=1;
+    s->phase_started_ms=now;s->exit_road_frames=0;s->exit_road_started_ms=0;
+    s->corner_have_guide=0;s->corner_guide_held=0;
+    s->exit_straight_active=0;s->exit_angle_frames=0;s->control_refresh=1;
 }
 void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t *obs,uint32_t now,uint8_t running)
 {
     if(!s || !obs || !RING_FEATURE_ENABLED || !running || s->fault) return;
     const ring_corner_frame_t *f=&obs->corners;
     if(s->have_frame && f->frame_number==s->corner_frame_number) return;
+    update_straight(s,now);
+    if(s->have_frame && (uint32_t)(now-s->last_frame_ms)>RING_VISION_STALE_MS) {
+        s->exit_road_frames=0;s->clear_frames=0;s->transition_frames=0;s->exit_angle_frames=0;
+    }
     s->have_frame=1;s->corner_frame_number=f->frame_number;s->last_frame_ms=now;
     if(s->phase==RING_STATE_COOLDOWN) {
-        if(confirmed(s,f->road_clear)) {s->phase=RING_STATE_IDLE;s->transition_frames=0;}
+        if(s->kind==TRACK_RING_360) {
+            if(exit_road_ready(obs)) {if(s->clear_frames<255U) ++s->clear_frames;}
+            else s->clear_frames=0;
+            if(s->clear_frames>=RING_360_REARM_FRAMES &&
+               (uint32_t)(now-s->phase_started_ms)>=RING_360_REARM_MS) {
+                s->phase=RING_STATE_IDLE;s->clear_frames=0;s->vote_frames=0;
+            }
+        } else if(confirmed(s,f->road_clear)) {s->phase=RING_STATE_IDLE;s->transition_frames=0;}
         return;
     }
     if(!s->action_locked) {
@@ -75,6 +144,7 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         s->entry_passed=0;s->exit_seen=0;s->exit_gap_seen=0;
         s->bridge_seen=0;s->bridge_passed=0;s->exit_armed=0;s->bridge_clear_frames=0;
         s->corner_have_guide=0;s->corner_guide_id=0;s->selected_path=invalid();
+        s->exit_straight_active=0;s->exit_straight_done=0;s->exit_angle_frames=0;s->exit_road_frames=0;
         s->entry_seen=1;s->event_started_ms=now;++s->event_id;stage(s,1,now);return;
     }
     unsigned in=s->direction==1 ? 0 : 1,out=1-in;
@@ -84,7 +154,7 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         switch(s->corner_stage) {
         case 1: if(confirmed(s,f->road_clear)) {stage(s,2,now);s->phase=RING_STATE_INSIDE;s->entry_passed=1;}break;
         case 2: if(confirmed(s,f->cross_entry && f->guide[RING_GUIDE_270_EXTEND].valid)) {stage(s,3,now);s->exit_seen=1;}break;
-        case 3: if(confirmed(s,f->road_clear)) complete(s);break;
+        case 3: if(confirmed(s,f->road_clear)) complete(s,now);break;
         default: break;
         }
         return;
@@ -106,21 +176,43 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         if(confirmed(s,f->paired && !f->v[in].quality)) {s->exit_gap_seen=1;stage(s,6,now);}
         break;
     case 6:
-        /* The previous right-mouth turn MUST be passed before a new inner V
-         * can be the final exit. Missing/reappearing first V is insufficient. */
-        if(f->gap[out] && f->breakpoint[out].quality) {
-            s->bridge_seen=1;s->bridge_clear_frames=0;
-            if(f->breakpoint[out].y>f->rows*.50f) s->bridge_passed=1;
-        } else if(s->bridge_seen && s->bridge_passed && f->paired && !f->v[in].quality) {
-            if(s->bridge_clear_frames<255) ++s->bridge_clear_frames;
-            if(s->bridge_clear_frames>=RING_CLEAR_FRAMES) s->exit_armed=1;
-        } else s->bridge_clear_frames=0;
-        if(confirmed(s,s->exit_armed &&
-           !(f->gap[out] && f->breakpoint[out].quality && f->breakpoint[out].y>=f->rows*.50f) &&
-           !(f->a[out].quality && f->a[out].y>=f->rows*.60f) && f->continuous[out] &&
-           f->v[in].quality && !(f->v_reacquired&(1U<<in)))) stage(s,7,now);
+        /* Full-width white band replaces the old bridge/new-V exit gate.
+         * Require usable same-frame repair; duplicated ISR observations do
+         * not count as additional confirming camera frames. */
+        if(confirmed(s,f->exit_white_band && f->guide[ring_pdf_guide(6,in)].valid)) {
+            s->exit_armed=1;stage(s,7,now);
+        }
         break;
-    case 7: if(confirmed(s,f->road_clear)) complete(s);break;
+    case 7:
+        if(s->exit_straight_active && !exit_road_visible(obs,in)) cancel_straight(s);
+        /* One-shot, based on the CURRENT measured outer contour, never on
+         * our synthetic 60-degree repair or the servo's 87-degree centre. */
+        if(!s->exit_straight_done && !s->exit_straight_active) {
+            int angle=out==1U ? f->border_angle10[out] : 1800-f->border_angle10[out];
+            int match=s->exit_armed && exit_road_visible(obs,in) && (f->border_angle_valid&(1U<<out)) &&
+                angle>=RING_EXIT_BORDER_TARGET10-RING_EXIT_BORDER_TOLERANCE10 &&
+                angle<=RING_EXIT_BORDER_TARGET10+RING_EXIT_BORDER_TOLERANCE10;
+            if(match) {if(s->exit_angle_frames<255U) ++s->exit_angle_frames;}
+            else s->exit_angle_frames=0;
+            if(s->exit_angle_frames>=RING_EXIT_STRAIGHT_CONFIRM_FRAMES) {
+                s->exit_straight_active=1;s->exit_straight_started_ms=now;
+                s->exit_road_frames=0;s->transition_frames=0;
+                s->corner_have_guide=0;s->corner_guide_held=0;s->corner_guide_id=0;
+                s->reset_tracking_history=1;s->control_refresh=1;
+            }
+        }
+        if(s->exit_straight_active) break;
+        /* A clear mouth is not yet a completed exit. First follow a CURRENT
+         * centred/aligned normal road while retaining S7 ownership, then
+         * release it only after an uninterrupted settling interval. */
+        if(exit_road_ready(obs)) {
+            if(!s->exit_road_frames) s->exit_road_started_ms=now;
+            if(s->exit_road_frames<255U) ++s->exit_road_frames;
+            s->transition_frames=s->exit_road_frames;
+            if(s->exit_road_frames>=RING_EXIT_SETTLE_FRAMES &&
+               (uint32_t)(now-s->exit_road_started_ms)>=RING_EXIT_SETTLE_MS) complete(s,now);
+        } else {s->exit_road_frames=0;s->transition_frames=0;}
+        break;
     default: break;
     }
 }
@@ -132,8 +224,17 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
         s->line_active=0;s->corner_guide_id=0;s->path_mode=TRACK_PATH_NORMAL;
         s->selected_path=obs->path[0];return s->selected_path;
     }
-    if(s->fault || obs->corners.frame_number!=s->corner_frame_number) return invalid();
+    if(s->fault || obs->corners.frame_number!=s->corner_frame_number) {
+        s->selected_path=invalid();s->line_active=0;s->corner_guide_id=0;s->corner_have_guide=0;
+        return s->selected_path;
+    }
     const ring_corner_frame_t *f=&obs->corners;
+    if(s->exit_straight_active && s->kind==TRACK_RING_360 && s->corner_stage==7) {
+        s->corner_have_guide=0;s->corner_guide_id=0;s->line_active=0;
+        s->path_mode=TRACK_PATH_STRAIGHT;
+        s->selected_path=(track_path_observation_t){0,0,1,100};
+        return s->selected_path;
+    }
     unsigned id=s->kind==TRACK_RING_360 ? ring_pdf_guide(s->corner_stage,s->direction==1 ? 0 : 1) :
         (s->corner_stage==2 ? RING_GUIDE_NONE :
          (f->guide[RING_GUIDE_270_CONNECT].valid ? RING_GUIDE_270_CONNECT : RING_GUIDE_270_EXTEND));
@@ -151,6 +252,42 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
         s->line_active=(uint8_t)(g->boundary[0].valid || g->boundary[1].valid);
         s->path_mode=s->line_active ? TRACK_PATH_STRAIGHT : TRACK_PATH_NORMAL;
         s->selected_path=(track_path_observation_t){g->error,g->heading,g->valid,g->confidence};return s->selected_path;
+    }
+    /* S3 owns the entry branch until the existing S4 transition confirms.
+     * A brief dropout may reuse ONLY a guide previously accepted in S3
+     * (including its same-direction S4 continuation). Never reuse S2 or
+     * silently steer down an ordinary fork. Do not refresh the hold deadline. */
+    if(s->kind==TRACK_RING_360 && s->corner_stage==3) {
+        unsigned side=s->direction==1 ? 0U : 1U;
+        if(s->corner_have_guide && s->selected_path.valid &&
+           (s->corner_guide_id==ring_pdf_guide(3,side) ||
+            s->corner_guide_id==ring_pdf_guide(4,side)) &&
+           (uint32_t)(s->last_frame_ms-s->corner_last_guide_ms)<=RING_CORNER_HOLD_MS) {
+            s->corner_guide_held=1;s->line_active=1;s->path_mode=TRACK_PATH_STRAIGHT;
+            return s->selected_path;
+        }
+        s->corner_have_guide=0;s->corner_guide_id=0;s->line_active=0;
+        s->path_mode=TRACK_PATH_STRAIGHT;s->selected_path=invalid();
+        return s->selected_path;
+    }
+    /* S7 must not select the old inner-V repair or a fork's ordinary centre
+     * after a brief loss of the white band. Reuse only this exit's same-side
+     * S6/S7 repair for the existing bounded hold interval. */
+    if(s->kind==TRACK_RING_360 && s->corner_stage==7) {
+        if(exit_road_ready(obs)) {
+            s->corner_have_guide=0;s->corner_guide_id=0;s->line_active=0;
+            s->path_mode=TRACK_PATH_STRAIGHT;s->selected_path=obs->path[TRACK_PATH_NORMAL];
+            return s->selected_path;
+        }
+        unsigned side=s->direction==1 ? 0U : 1U;
+        if(s->corner_have_guide && s->selected_path.valid &&
+           (s->corner_guide_id==ring_pdf_guide(6,side) || s->corner_guide_id==ring_pdf_guide(7,side)) &&
+           (uint32_t)(s->last_frame_ms-s->corner_last_guide_ms)<=RING_CORNER_HOLD_MS) {
+            s->corner_guide_held=1;s->line_active=1;s->path_mode=TRACK_PATH_STRAIGHT;
+            return s->selected_path;
+        }
+        s->corner_have_guide=0;s->corner_guide_id=0;s->line_active=0;
+        s->path_mode=TRACK_PATH_STRAIGHT;s->selected_path=invalid();return s->selected_path;
     }
     /* Clear in-ring rows may use ordinary vision. Missing repair geometry must
      * not silently change branches or draw an old-frame line as a current one. */

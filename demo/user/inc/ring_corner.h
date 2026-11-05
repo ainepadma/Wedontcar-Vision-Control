@@ -13,6 +13,41 @@
 #define RING_CORNER_MIN_QUALITY 55U
 #define RING_CORNER_REACQUIRE_FRAMES 2U
 
+/* Exit white band: every pixel in each row must be white, for this many
+ * consecutive rows (percentage of current image height, rounded up). */
+#ifndef RING_EXIT_WHITE_BAND_PERCENT
+#define RING_EXIT_WHITE_BAND_PERCENT 5
+#endif
+/* Angle measured FROM the vertical forward direction in native image pixels.
+ * 60 degrees => horizontal travel / upward travel = tan(60) ~= 1.732.
+ * Must be finite and strictly between 0 and 90; invalid values disable repair. */
+#ifndef RING_EXIT_LINE_ANGLE_DEG
+#define RING_EXIT_LINE_ANGLE_DEG 60.0f
+#endif
+#if RING_EXIT_WHITE_BAND_PERCENT < 1 || RING_EXIT_WHITE_BAND_PERCENT > 100
+#error "RING_EXIT_WHITE_BAND_PERCENT must be between 1 and 100"
+#endif
+
+/* 360 entry tuning, in percent of the CURRENT image height.
+ * P must remain above A. Bounds are inclusive; 100 imposes no extra upper cut.
+ * Temporarily allow image-edge contact; size/height checks remain active.
+ * Set to 1 to restore the enclosed-component requirement. */
+#ifndef RING_ENTRY_REQUIRE_CLOSED_ISLAND
+#define RING_ENTRY_REQUIRE_CLOSED_ISLAND 0
+#endif
+#ifndef RING_ENTRY_AP_MIN_GAP_PERCENT
+#define RING_ENTRY_AP_MIN_GAP_PERCENT 10
+#endif
+#ifndef RING_ENTRY_AP_MAX_GAP_PERCENT
+#define RING_ENTRY_AP_MAX_GAP_PERCENT 100
+#endif
+#if RING_ENTRY_REQUIRE_CLOSED_ISLAND != 0 && RING_ENTRY_REQUIRE_CLOSED_ISLAND != 1
+#error "RING_ENTRY_REQUIRE_CLOSED_ISLAND must be 0 or 1"
+#endif
+#if RING_ENTRY_AP_MIN_GAP_PERCENT < 0 || RING_ENTRY_AP_MAX_GAP_PERCENT > 100 || RING_ENTRY_AP_MIN_GAP_PERCENT > RING_ENTRY_AP_MAX_GAP_PERCENT
+#error "360 entry A/P gap must satisfy 0 <= min <= max <= 100"
+#endif
+
 typedef enum { RING_CORNER_NONE=0, RING_CORNER_A, RING_CORNER_B } ring_corner_class_t;
 typedef enum {
     RING_GUIDE_NONE=0, RING_GUIDE_270_EXTEND, RING_GUIDE_270_CONNECT,
@@ -51,11 +86,18 @@ typedef struct {
     uint16_t rows,cols,detector_near_row; /* Last vertex row supported by every sampling radius. */
     uint16_t border[2][480], border_index[2][480];
     uint8_t border_flags[480];
+    /* Real near/middle border angle FROM horizontal, tenths of degrees.
+     * x=k*y+c: k>0 => angle<900, vertical=>900, mirror=>1800-angle.
+     * bit side in valid; never measured from a synthetic guide segment. */
+    int16_t border_angle10[2];
+    uint8_t border_angle_valid;
     uint8_t quality[2],continuous[2],gap[2],bottom_open[2],paired;
     uint8_t entry[2],cross_entry;
     ring_corner_point_t a[2],p[2],v[2],breakpoint[2];
     ring_corner_point_t mouth_upper[2],mouth_lower[2];
     uint8_t paired_mouth,v_reacquired;
+    uint8_t exit_white_band;
+    uint16_t exit_white_top,exit_white_bottom; /* Inclusive; nearest qualifying band. */
     uint8_t count[2],road_clear,continued_mask; /* bit side: locally reacquired A; never an event vote. */
     ring_corner_point_t point[2][RING_CORNER_MAX_PER_SIDE]; /* Near to far. */
     ring_corner_guide_t guide[RING_CORNER_GUIDE_COUNT];
