@@ -51,6 +51,8 @@ volatile uint8_t motor_feedback_fault = 0;
 volatile uint8_t protection_enabled = AUTOMATIC_PROTECTION_DEFAULT;
 volatile uint8_t speed_full_enabled = 0;
 volatile uint8_t track_ready = 0;
+volatile uint8_t track_stripe_status = 0;
+static track_stripe_state_t stripe_control;
 volatile uint8_t track_stop_reason = TRACK_STOP_MANUAL;
 volatile track_stop_snapshot_t track_last_stop;
 volatile int16_t track_servo_tenths = 0;
@@ -83,6 +85,7 @@ static volatile struct
     uint8_t confidence, valid, ring_candidate;
     int8_t ring_direction;
     track_ring_observation_t ring;
+    track_stripe_observation_t stripe;
     uint32_t observed_ms, generation, frame_number;
 } track_mailbox;
 
@@ -100,6 +103,7 @@ void track_runtime_init(void)
     };
     track_control_init(&track_control, &config);
     ring_control_init(&ring_control);
+    track_stripe_init(&stripe_control);
     protection_switch_state.enabled = AUTOMATIC_PROTECTION_DEFAULT;
     speed_mode_switch_state.enabled = 0U;
     protection_enabled = AUTOMATIC_PROTECTION_DEFAULT;
@@ -136,6 +140,7 @@ void track_frame_publish(const track_vision_result_t *result)
     track_mailbox.ring_candidate = result->ring_candidate;
     track_mailbox.ring_direction = result->ring_direction;
     track_mailbox.ring = result->ring;
+    track_mailbox.stripe = result->stripe;
     track_mailbox.observed_ms = control_clock_ms;
     ++track_mailbox.generation;
     __DMB();
@@ -226,6 +231,8 @@ void PIT_IRQHandler(void)
             else
             {
                 ring_control_init(&ring_control); // C13 starts a new run: clear faults and 270/360 completion records
+                track_stripe_restart(&stripe_control, (uint8_t)(track_mailbox.stripe.reliable &&
+                    track_mailbox.stripe.visible && track_mailbox.stripe.near));
                 track_control_toggle(&track_control, control_clock_ms);
                 steering_log_start();
             }
@@ -334,11 +341,22 @@ void PIT_IRQHandler(void)
                           ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
                 fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
         }
-        if (protection_enabled && ring_control.fault)
+        /* Seven-stripe stop is independent of C14 and ordinary path validity.
+         * Repeated ring refreshes cannot count as additional camera frames. */
+#if !SERVO_CENTER_TEST_MODE && !SPEED_BENCH_MODE
+        if (fresh_ring_frame)
+        {
+            const track_stripe_observation_t stripe = track_mailbox.stripe;
+            if (track_stripe_observe(&stripe_control, &stripe, track_mailbox.observed_ms,
+                                     control_clock_ms, track_control.running))
+                track_control_stop(&track_control, TRACK_STOP_STRIPE);
+        }
+        track_stripe_status = stripe_control.stopped ? 2U :
+            (stripe_control.bypass ? 3U : (stripe_control.armed ? 1U : 0U));
+#endif
+        if (protection_enabled && ring_control.fault && track_control.running)
             track_control_stop(&track_control, TRACK_STOP_RING);
         track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
-        if (ring_control_straight_active(&ring_control, control_clock_ms))
-            track_control_force_straight(&track_control, &output);
         if (ring_control_guidance_active(&ring_control) &&
             output.target_speed > TRACK_SPEED_CURVE_MIN)
             output.target_speed = TRACK_SPEED_CURVE_MIN;

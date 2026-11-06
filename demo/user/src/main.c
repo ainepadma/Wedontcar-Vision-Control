@@ -185,7 +185,7 @@ static void steering_log_service(void)
                     log_export_hash=2166136261U;
                     log_export_state=1U;
                     log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),
-                        "\r\n#LOG BEGIN %lu %lu %lu FW=0.25.0\r\n%s",
+                        "\r\n#LOG BEGIN %lu %lu %lu FW=0.26.0\r\n%s",
                         (unsigned long)info.session,(unsigned long)info.count,
                         (unsigned long)info.overwritten,steering_log_csv_header()));
                 }
@@ -292,7 +292,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.25.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
+        "#CAM FW=0.26.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -393,7 +393,7 @@ static void assistant_send_speed(uint32_t now)
     int32_t left_total = encoder_total_l, right_total = encoder_total_r;
     interrupt_global_enable(primask);
     int length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#SPD FW=0.25.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
+        "#SPD FW=0.26.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
         (unsigned long)now, (unsigned int)running, (unsigned int)protection,
         (unsigned int)full, (unsigned int)stop, (unsigned int)fault,
         (int)(target * 10.0f), (int)left, (int)right,
@@ -569,6 +569,7 @@ static void screen_draw_stats(void)
             last_stop.reason==TRACK_STOP_ENCODER ? "ENC" :
             last_stop.reason==TRACK_STOP_LOST ? "LOST" :
             last_stop.reason==TRACK_STOP_STALE ? "STALE" :
+            last_stop.reason==TRACK_STOP_STRIPE ? "STRIPE" :
             last_stop.reason==TRACK_STOP_RING ? "RING" : "READY";
         snprintf(line,sizeof(line),"LAST %s:%u P%u ",name,(unsigned)last_stop.wheels,(unsigned)last_stop.protection);
         tft180_show_string(0,102,line);
@@ -620,13 +621,19 @@ static void screen_draw_stats(void)
         snprintf(line, sizeof(line), fault_format, (unsigned int)motor_feedback_fault);
         tft180_show_string(0, 134, line);
     }
+    else if (track_stop_reason == TRACK_STOP_STRIPE)
+        tft180_show_string(0, 134, "STRIPE STOP    ");
+    else if (motor_enabled && track_stripe_status == 1U)
+        tft180_show_string(0, 134, "STRIPE ARMED   ");
+    else if (motor_enabled && track_stripe_status == 3U)
+        tft180_show_string(0, 134, "STRIPE LEAVE   ");
     else if (track_stop_reason == TRACK_STOP_RING)
         tft180_show_string(0, 134, "RING FAULT     ");
     else if (motor_enabled && ring_display->action_locked)
     {
         if(ring_display->kind==TRACK_RING_360)
             snprintf(line,sizeof(line),"360 S%u %-8s",(unsigned int)ring_display->corner_stage,
-                     ring_display->exit_straight_active ? "STRAIGHT" : ring_control_stage_name(ring_display->corner_stage));
+                     ring_control_stage_name(ring_display->corner_stage));
         else snprintf(line, sizeof(line), "%u %s ",270U,
             ring_display->corner_guide_held ? "HOLD    " :
             (ring_display->phase==RING_STATE_INSIDE ? "INSIDE  " :
@@ -715,8 +722,7 @@ static void screen_draw_track_overlay(void)
         screen_path_source='H';
     } else if(!state->fault && !same_frame) {
         screen_path_source='?';
-    } else if(!state->fault && state->exit_straight_active) {
-        screen_path_source='T';
+
     } else if(!state->fault && state->kind==TRACK_RING_360 && state->corner_stage==7 &&
               state->action_locked && state->selected_path.valid && !state->corner_have_guide) {
         screen_path_source='N';
@@ -922,6 +928,8 @@ int main(void)
                 track_result.frame_number = frame_number;
                 track_ring_vision_process(&ring_vision_model, (uint8_t *)image,
                                           MT9V03X_H, MT9V03X_W, &track_result);
+                track_stripe_detect((uint8_t *)image, MT9V03X_H, MT9V03X_W,
+                                    &track_result.stripe);
             }
             else
             {

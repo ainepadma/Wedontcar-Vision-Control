@@ -306,26 +306,34 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
     g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
     g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
 }
-static void exit_diagonal(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
-                          const ring_corner_frame_t *f,ring_corner_guide_t *g)
+/* Late-ring mouth lip. This separate candidate never changes initial entry,
+ * 270 classification, or the original S3/S4 corner detectors. A local inward
+ * extremum must have substantial supported arms on both sides. */
+static ring_corner_point_t bridge_tip(unsigned h,unsigned w,unsigned side)
 {
-    if(!f->exit_white_band) return;
-    unsigned side=1U-inner;
-    const ring_corner_point_t *a=&f->a[side];
-    float angle=RING_EXIT_LINE_ANGLE_DEG;
-    if(a->kind!=RING_CORNER_A || a->quality<RING_CORNER_MIN_QUALITY || !isfinite(a->x) || !isfinite(a->y) ||
-       a->x<0.f || a->x>w-1.f || a->y<0.f || a->y>h-1.f ||
-       !isfinite(angle) || angle<=0.f || angle>=90.f) return;
-    float slope=tanf(angle*0.01745329251994329577f);
-    float x=a->x,y=a->y;
-    /* Anchor is the actual opposite-side A, never the white-band row or an
-     * image corner. Clip distance along the ray so the requested angle and
-     * starting point both remain exact when the ray meets a side edge. */
-    float span=fminf(y,(side ? x : w-1.f-x)/slope);
-    if(span<2.f) return;
-    segment(g,side,x,y,clamp(x+(side ? -span : span)*slope,0.f,w-1.f),y-span);
-    g->clip_upper=1;g->corner_side=(uint8_t)side;g->corner_kind=RING_CORNER_A;
-    g->corner_x=x;g->corner_y=y;
+    ring_corner_point_t tip;memset(&tip,0,sizeof(tip));
+    unsigned radius=h/16U;if(radius<4U) radius=4U;
+    float best=0.f;
+    for(unsigned y=h/6U;y+radius+3U<h*9U/10U;++y) {
+        if(y<=radius+2U || !valid(side,y-radius) || !valid(side,y) || !valid(side,y+radius)) continue;
+        float here=profile(side,(int)y,w),before=profile(side,(int)(y-radius),w),after=profile(side,(int)(y+radius),w);
+        float up=here-before,down=here-after;
+        if(up<w*.025f || down<w*.015f) continue;
+        float score=fminf(up,down);
+        if(score>best) {best=score;tip=point(side ? w-1.f-here : here,y,RING_CORNER_A);}
+    }
+    return tip;
+}
+static void exit_connection(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
+                            const ring_corner_frame_t *f,ring_corner_guide_t *g)
+{
+    /* Fig 1.14 / user's p6: the CURRENT inner V closes the last fork down
+     * to the CURRENT lower black boundary. No white-band or angle gate. */
+    ring_corner_point_t tip=f->v[inner];
+    if(!tip.quality || !valid(inner,h-2U) || tip.y>=h*.85f) return;
+    segment(g,inner,tip.x,tip.y,b[inner][h-2U],h-1U);
+    g->clip_upper=1;g->corner_side=(uint8_t)inner;g->corner_kind=RING_CORNER_B;
+    g->corner_x=tip.x;g->corner_y=tip.y;
     finish(im,h,w,g);
 }
 /* Entry P needs a supported black component, not a tiny speck or the entire
@@ -441,6 +449,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         finish(im,h,w,connected);
     }
     if(connected->valid) *cross=*connected;
+    for(unsigned side=0;side<2;++side) f->bridge_tip[side]=bridge_tip(h,w,side);
     for(unsigned side=0;side<2;++side) for(unsigned stage=1;stage<=7;++stage) {
         unsigned other=1-side;float outer=side ? w-1.f : 0.f;
         ring_corner_guide_t *g=&f->guide[ring_pdf_guide(stage,side)];
@@ -450,7 +459,10 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         if(stage==2 && p.quality) segment(g,side,p.x,p.y,outer,h-1);
         if(stage==3 && v.quality) segment(g,other,v.x,v.y,b[other][h-2],h-1);
         if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);
-        if(stage==5 && bp.quality) {
+        if(stage==5 || stage==6) {
+            if(f->bridge_tip[other].quality) bp=f->bridge_tip[other];
+        }
+        if((stage==5 || stage==6) && bp.quality) {
             /* User's exit sketch: close the local mouth from its lower outer
              * corner to the REAL upper cross-boundary, not an image corner.
              * Probe one quarter of the near lane width inward, then search
@@ -465,7 +477,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
             }
             if(roof>1 && roof<bp.y-3) segment(g,other,x,roof,bp.x,bp.y);
         }
-        if(stage==6 || stage==7) {exit_diagonal(im,h,w,side,f,g);continue;}
+        if(stage==7) {exit_connection(im,h,w,side,f,g);continue;}
         if(stage==3 || stage==4) g->clip_upper=1;
         if(stage==6 || stage==5 || g->boundary[0].valid || g->boundary[1].valid) finish(im,h,w,g);
     }
@@ -539,8 +551,8 @@ void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ri
                 g->clip_upper=1;segment(g,other,vertex.x,vertex.y,b[other][f->rows-2],f->rows-1);finish(im,f->rows,f->cols,g);
                 g=&f->guide[ring_pdf_guide(4,other)];memset(g,0,sizeof(*g));
                 g->clip_upper=1;segment(g,side,vertex.x,vertex.y,side ? f->cols-1.f : 0.f,f->rows-1);finish(im,f->rows,f->cols,g);
-                /* S7 is white-band based; a recovered V cannot replace its
-                 * opposite-side diagonal with the obsolete inner-side line. */
+                g=&f->guide[ring_pdf_guide(7,side)];memset(g,0,sizeof(*g));
+                exit_connection(im,f->rows,f->cols,side,f,g);
             }
         }
         if(f->v[side].quality) {s->v[side]=f->v[side];s->v_valid[side]=1;s->v_misses[side]=0;}

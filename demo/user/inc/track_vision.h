@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "ring_corner.h"
+#include "track_stripe.h"
 
 /* 1: recognize and drive 270/360 rings; 0: ordinary line following only.
  * Change this single setting and rebuild. Does not disable ordinary curves.
@@ -111,6 +112,7 @@ typedef struct track_vision_result_t
     uint8_t ring_candidate;
     int8_t ring_direction; /* +1 left, -1 right, 0 unresolved. */
     track_ring_observation_t ring;
+    track_stripe_observation_t stripe;
     uint16_t raw_left[TRACK_VISION_MAX_ROWS], raw_right[TRACK_VISION_MAX_ROWS];
     uint8_t raw_flags[TRACK_VISION_MAX_ROWS]; /* bit0 left, bit1 right */
     uint16_t guide_center[TRACK_PATH_COUNT - 1][TRACK_VISION_MAX_ROWS];

@@ -13,20 +13,8 @@
 #define RING_CORNER_MIN_QUALITY 55U
 #define RING_CORNER_REACQUIRE_FRAMES 2U
 
-/* Exit white band: every pixel in each row must be white, for this many
- * consecutive rows (percentage of current image height, rounded up). */
-#ifndef RING_EXIT_WHITE_BAND_PERCENT
+/* Diagnostic only; full-white rows do not trigger an exit. */
 #define RING_EXIT_WHITE_BAND_PERCENT 5
-#endif
-/* Angle measured FROM the vertical forward direction in native image pixels.
- * 60 degrees => horizontal travel / upward travel = tan(60) ~= 1.732.
- * Must be finite and strictly between 0 and 90; invalid values disable repair. */
-#ifndef RING_EXIT_LINE_ANGLE_DEG
-#define RING_EXIT_LINE_ANGLE_DEG 60.0f
-#endif
-#if RING_EXIT_WHITE_BAND_PERCENT < 1 || RING_EXIT_WHITE_BAND_PERCENT > 100
-#error "RING_EXIT_WHITE_BAND_PERCENT must be between 1 and 100"
-#endif
 
 /* 360 entry tuning, in percent of the CURRENT image height.
  * P must remain above A. Bounds are inclusive; 100 imposes no extra upper cut.
@@ -94,6 +82,7 @@ typedef struct {
     uint8_t quality[2],continuous[2],gap[2],bottom_open[2],paired;
     uint8_t entry[2],cross_entry;
     ring_corner_point_t a[2],p[2],v[2],breakpoint[2];
+    ring_corner_point_t bridge_tip[2]; /* Late-ring mouth lips, separate from entry. */
     ring_corner_point_t mouth_upper[2],mouth_lower[2];
     uint8_t paired_mouth,v_reacquired;
     uint8_t exit_white_band;

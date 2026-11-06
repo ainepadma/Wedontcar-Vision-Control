@@ -22,7 +22,8 @@ typedef enum
     TRACK_STOP_ENCODER,
     TRACK_STOP_NO_FEEDBACK,
     TRACK_STOP_OVERSPEED,
-    TRACK_STOP_RING
+    TRACK_STOP_RING,
+    TRACK_STOP_STRIPE
 } track_control_stop_reason_t;
 
 typedef struct
@@ -102,7 +103,5 @@ void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled);
 void track_control_stop(track_control_state_t *state, uint8_t reason);
 track_control_output_t track_control_tick(track_control_state_t *state,
                                          uint32_t now_ms);
-/* Explicit bounded S7 manoeuvre. Preserve speed and stop decisions. */
-void track_control_force_straight(track_control_state_t *state,track_control_output_t *output);
 
 #endif

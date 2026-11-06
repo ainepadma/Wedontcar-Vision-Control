@@ -18,7 +18,7 @@
 // C13 / KEY_3 控制两个驱动电机；上电默认停止，按住上电不会启动。
 #define MOTOR_TOGGLE_KEY C13
 // C14 / KEY_2 控制视觉/环岛自动停车；赛道版上电默认关闭，可按 C14 开启。
-// 编码器反号、无反馈和超速保护始终有效，C13手动停机和PWM硬限幅始终保留。
+// 七条黑条到位停车、编码器反号、无反馈和超速保护始终有效；C13手动停机保留。
 #define PROTECTION_TOGGLE_KEY C14
 #define AUTOMATIC_PROTECTION_DEFAULT 0U
 // C15 / KEY_1 每按一次将普通档直道目标增加10.0f；重启恢复TRACK_SPEED_STRAIGHT。
@@ -29,6 +29,7 @@ extern volatile uint8_t motor_feedback_fault; // 1=左、2=右、3=两侧；原�
 extern volatile uint8_t protection_enabled;
 extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
+extern volatile uint8_t track_stripe_status; /* 0 search, 1 armed, 2 locked, 3 bypass */
 extern volatile uint8_t track_stop_reason;
 extern volatile track_stop_snapshot_t track_last_stop;
 extern volatile int32_t encoder_total_l, encoder_total_r;
