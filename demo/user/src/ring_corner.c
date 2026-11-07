@@ -10,6 +10,7 @@
 static uint16_t edge[2][LIMIT][2],length[2];
 static uint16_t b[2][480];
 static uint8_t flags[480];
+volatile float ring_third_left_lean=0.06f;
 static const int8_t step[2][8][2]={
  {{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1},{1,0},{1,1}},
  {{0,1},{1,1},{1,0},{1,-1},{0,-1},{-1,-1},{-1,0},{-1,1}}};
@@ -306,6 +307,101 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
     g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
     g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
 }
+/* Third repair has a single authoritative border. A constant lateral offset
+ * gives a parallel center; neither the discarded outer branch nor the old
+ * ordinary center can pull it sideways below the short visible segment. */
+static void third_finish(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
+                         ring_corner_guide_t *g)
+{
+    const ring_corner_line_t *line=&g->boundary[1U-inner];
+    g->valid=0;g->confidence=0;g->center_valid=0;g->center_link_valid=0;
+    memset(g->center,0,sizeof(g->center));
+    if(!line->valid) return;
+    unsigned top=(unsigned)ceilf(fminf(line->y0,line->y1));
+    if(top+6U>=h) return;
+    g->third_repair=1;g->clip_upper=1;g->active_top=(uint16_t)top;g->active_end=(uint16_t)h;
+    /* A fixed native-image offset is independent of every discarded branch.
+     * In particular, do NOT estimate width from the old outer border. */
+    float half=w*.30f;
+    float sum=0,weight=0,ns=0,fs=0;unsigned n=0,nc=0,fc=0;
+    unsigned span=h-top,zone=span/3U;uint8_t linked=1;
+    for(unsigned y=0;y<h;++y) {
+        float border=line_x(line,(float)y);
+        float center=border+(inner ? half : -half);
+        int ok=y>=top && center>=0.f && center<w-1.f;
+        unsigned x=(unsigned)clamp(center,0,w-1);
+        if(ok && !im[y*w+x]) ok=0;
+        unsigned index=0;
+        while(index+1U<RING_CORNER_CENTER_SAMPLES &&
+              (index+1U)*(h-1U)/(RING_CORNER_CENTER_SAMPLES-1U)<=y) ++index;
+        if(!ok) linked=0;
+        if(y==index*(h-1U)/(RING_CORNER_CENTER_SAMPLES-1U)) {
+            if(ok) {
+                g->center[index]=(uint16_t)x;g->center_valid|=(uint16_t)(1U<<index);
+                if(linked && index) g->center_link_valid|=(uint16_t)(1U<<index);
+            }
+            linked=(uint8_t)ok;
+        }
+        if(!ok) continue;
+        float wt=y>=h-zone ? 3.f : (y>=top+zone ? 2.f : 1.f);
+        sum+=center*wt;weight+=wt;++n;
+        if(y>=h-zone) {ns+=center;++nc;}
+        if(y<top+zone) {fs+=center;++fc;}
+    }
+    g->confidence=(uint8_t)(n*100U/span);
+    if(n*100U<span*50U || nc<span/8U || fc<3U || !weight) return;
+    g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
+    g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
+}
+static void third_rotate(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
+                         float slope,ring_corner_guide_t *g)
+{
+    ring_corner_line_t *line=&g->boundary[1U-inner];
+    float lean=ring_third_left_lean;
+    if(!isfinite(lean)) lean=0.05f;
+    slope+=(inner ? -1.f : 1.f)*clamp(lean,0.f,.5f)*(float)w/h;
+    /* Rotate around this frame's real tip, never around the roof probe. */
+    line->x1=g->corner_x;line->y1=g->corner_y;
+    line->x0=line->x1+slope*(line->y0-line->y1);
+    third_finish(im,h,w,inner,g);
+}
+/* Recover the SAME mouth tip from current row pixels after a detector switch.
+ * A real inward extremum with two supported arms is required; no old x/y is
+ * copied into a new frame. */
+static int third_reacquire(unsigned h,unsigned w,unsigned outer,
+                           const ring_corner_frame_t *f,const ring_corner_point_t *old,ring_corner_point_t *tip)
+{
+    float best=1e9f,sign=outer ? -1.f : 1.f;
+    unsigned r=h/30U+2U;
+    const ring_corner_point_t *raw=&f->a[outer];
+    if(raw->quality && fabsf(raw->x-old->x)<=w*.06f && fabsf(raw->y-old->y)<=h*.08f) {
+        *tip=*raw;return 1;
+    }
+    /* The row run can switch components at a split. Re-find the actual
+     * contour vertex first, using the same local shape as raw A detection. */
+    for(unsigned trace_side=0;trace_side<2U;++trace_side)
+        for(unsigned i=3;i+3U<length[trace_side];++i) {
+            int x=edge[trace_side][i][0],y=edge[trace_side][i][1];
+            int x0=edge[trace_side][i-3U][0],y0=edge[trace_side][i-3U][1];
+            int x1=edge[trace_side][i+3U][0],y1=edge[trace_side][i+3U][1];
+            float dx=(float)x-old->x,dy=(float)y-old->y;
+            if(fabsf(dx)>w*.06f || fabsf(dy)>h*.08f || y<y0 || y<y1 ||
+               (y==y0 && y==y1) || abs(x1-x0)<3) continue;
+            float distance=dx*dx+dy*dy;
+            if(distance<best) {best=distance;*tip=point((float)x,(float)y,RING_CORNER_A);}
+        }
+    if(best<1e9f) return 1;
+    for(unsigned y=r+1U;y+r<h-1U;++y) {
+        if(!valid(outer,y-r) || !valid(outer,y) || !valid(outer,y+r)) continue;
+        float x=b[outer][y],dx=x-old->x,dy=(float)y-old->y;
+        if(fabsf(dx)>w*.06f || fabsf(dy)>h*.08f ||
+           sign*(x-b[outer][y-r])<w*.012f ||
+           sign*(x-b[outer][y+r])<w*.008f) continue;
+        float distance=dx*dx+dy*dy;
+        if(distance<best) {best=distance;*tip=point(x,(float)y,RING_CORNER_A);}
+    }
+    return best<1e9f;
+}
 /* Late-ring mouth lip. This separate candidate never changes initial entry,
  * 270 classification, or the original S3/S4 corner detectors. A local inward
  * extremum must have substantial supported arms on both sides. */
@@ -538,21 +634,27 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         if((stage==5 || stage==6) && f->bridge_ready[side] && bp.quality) {
             /* User's exit sketch: close the local mouth from its lower outer
              * corner to the REAL upper cross-boundary, not an image corner.
-             * Probe one quarter of the near lane width inward, then search
+             * Probe a fixed native-image distance inward, then search
              * upward for a supported black roof (three consecutive pixels).
              * The mirrored construction serves a clockwise/right ring. */
-            float lane=clamp((float)b[1][h-2]-b[0][h-2],w*.20f,w*.80f);
-            int x=(int)clamp(bp.x+(side ? 1.f : -1.f)*lane*.25f,2,w-3);
+            /* About the original quarter-lane probe, without consulting the
+             * discarded outer branch. It cannot translate with that branch. */
+            int x=(int)clamp(bp.x+(side ? 1.f : -1.f)*(float)w/6.f,2,w-3);
             unsigned black=0;int roof=-1;
             for(int y=(int)bp.y-3;y>1;--y) {
                 if(!im[(unsigned)y*w+(unsigned)x]) ++black;else black=0;
                 if(black>=3) {roof=y+3;break;}
             }
-            if(roof>1 && roof<bp.y-3) segment(g,other,x,roof,bp.x,bp.y);
+            if(roof>1 && roof<bp.y-3) {
+                segment(g,other,x,roof,bp.x,bp.y);
+                g->corner_side=(uint8_t)other;g->corner_kind=RING_CORNER_A;
+                g->corner_x=bp.x;g->corner_y=bp.y;
+                third_rotate(im,h,w,side,(bp.x-x)/(bp.y-roof),g);
+            }
         }
         if(stage==7) {exit_connection(im,h,w,side,f,g);continue;}
         if(stage==3 || stage==4) g->clip_upper=1;
-        if(stage==6 || stage==5 || g->boundary[0].valid || g->boundary[1].valid) finish(im,h,w,g);
+        if(!g->third_repair && (stage==6 || stage==5 || g->boundary[0].valid || g->boundary[1].valid)) finish(im,h,w,g);
     }
     /* Preview starts at the recognized entry, never guesses a motion stage. */
     for(unsigned side=0;side<2;++side) f->guide[RING_GUIDE_A_LEFT+side]=f->guide[ring_pdf_guide(1,side)];
@@ -584,6 +686,44 @@ void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ri
 {
     (void)ctx;if(!s || !f || !im || !f->rows || !f->cols) return;
     if(s->rows!=f->rows || s->cols!=f->cols) {memset(s,0,sizeof(*s));s->rows=f->rows;s->cols=f->cols;}
+    /* S5/S6 only: smooth slope noise, keep the CURRENT corner as pivot. A
+     * large candidate jump must first reacquire the previous tip in pixels. */
+    for(unsigned inner=0;inner<2U;++inner) {
+        ring_corner_guide_t *g=&f->guide[ring_pdf_guide(5,inner)];
+        ring_corner_line_t *line=&g->boundary[1U-inner];
+        int accepted=g->third_repair && line->valid;
+        ring_corner_point_t tip;memset(&tip,0,sizeof(tip));
+        if(s->third_valid[inner] && (!accepted ||
+           fabsf(g->corner_x-s->third_tip[inner].x)>f->cols*.06f ||
+           fabsf(g->corner_y-s->third_tip[inner].y)>f->rows*.08f)) {
+            if(third_reacquire(f->rows,f->cols,1U-inner,f,&s->third_tip[inner],&tip)) {
+                if(!accepted) {
+                    memset(g,0,sizeof(*g));g->third_repair=1;
+                    float top=fmaxf(2.f,tip.y-f->rows*.20f);
+                    segment(g,1U-inner,tip.x+s->third_slope[inner]*(top-tip.y),
+                            top,tip.x,tip.y);
+                    line=&g->boundary[1U-inner];
+                }
+                g->corner_side=(uint8_t)(1U-inner);g->corner_kind=RING_CORNER_A;
+                g->corner_x=tip.x;g->corner_y=tip.y;accepted=1;
+            } else accepted=0;
+        }
+        if(accepted) {
+            float lean=ring_third_left_lean;if(!isfinite(lean)) lean=.05f;
+            float slope=(line->x1-line->x0)/(line->y1-line->y0)-
+                (inner ? -1.f : 1.f)*clamp(lean,0.f,.5f)*(float)f->cols/f->rows;
+            if(tip.quality) slope=s->third_slope[inner];
+            else if(s->third_valid[inner]) slope=s->third_slope[inner]*.8f+slope*.2f;
+            third_rotate(im,f->rows,f->cols,inner,slope,g);
+            s->third_slope[inner]=slope;
+            s->third_tip[inner]=point(g->corner_x,g->corner_y,RING_CORNER_A);
+            s->third_valid[inner]=1;s->third_misses[inner]=0;
+        } else if(s->third_valid[inner]) {
+            memset(g,0,sizeof(*g));
+            if(++s->third_misses[inner]>2U) s->third_valid[inner]=0;
+        }
+        f->guide[ring_pdf_guide(6,inner)]=*g;
+    }
     if(!f->paired_mouth && s->valid[0] && s->valid[1]) {
         ring_corner_point_t lower[2],upper[2];int ok=1;
         for(unsigned side=0;side<2;++side) {

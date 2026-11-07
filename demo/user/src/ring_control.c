@@ -248,6 +248,19 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
         s->corner_have_guide=0;s->corner_guide_id=0;s->line_active=0;
         s->path_mode=TRACK_PATH_STRAIGHT;s->selected_path=invalid();return s->selected_path;
     }
+    /* Once the third repair owns the fork, never fall back to the discarded
+     * ordinary branch. A short dropout can hold only this third repair. */
+    if(s->kind==TRACK_RING_360 && (s->corner_stage==5 || s->corner_stage==6) && s->bridge_seen) {
+        unsigned side=s->direction==1 ? 0U : 1U;
+        if(s->corner_have_guide && s->selected_path.valid &&
+           (s->corner_guide_id==ring_pdf_guide(5,side) || s->corner_guide_id==ring_pdf_guide(6,side)) &&
+           (uint32_t)(s->last_frame_ms-s->corner_last_guide_ms)<=RING_CORNER_HOLD_MS) {
+            s->corner_guide_held=1;s->line_active=1;s->path_mode=TRACK_PATH_STRAIGHT;
+            return s->selected_path;
+        }
+        s->corner_have_guide=0;s->corner_guide_id=0;s->line_active=0;
+        s->path_mode=TRACK_PATH_STRAIGHT;s->selected_path=invalid();return s->selected_path;
+    }
     /* Clear in-ring rows may use ordinary vision. Missing repair geometry must
      * not silently change branches or draw an old-frame line as a current one. */
     if((s->kind==TRACK_RING_270 && s->corner_stage==2) ||

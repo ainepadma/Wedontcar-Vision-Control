@@ -16,6 +16,12 @@
 /* Diagnostic only; full-white rows do not trigger an exit. */
 #define RING_EXIT_WHITE_BAND_PERCENT 5
 
+/* Third repair ONLY (S5/S6). Extra left lean in normalized dx/dy.
+ * 0 restores the measured slope; start at 0.05, increase in steps of 0.01.
+ * The current black corner stays fixed while the upper end rotates left.
+ * Mirrored right rings rotate inward. Runtime/debugger tunable, clamped 0..0.5. */
+extern volatile float ring_third_left_lean;
+
 /* 360 entry tuning, in percent of the CURRENT image height.
  * P must remain above A. Bounds are inclusive; 100 imposes no extra upper cut.
  * Temporarily allow image-edge contact; size/height checks remain active.
@@ -61,6 +67,7 @@ typedef struct {
     int16_t error,heading; /* Same units/sign as ordinary track_path_observation_t. */
     uint8_t valid,confidence;
     uint8_t clip_upper;
+    uint8_t third_repair; /* S5/S6: center follows only the virtual outer border. */
     uint16_t active_top,active_end;
     ring_corner_line_t boundary[2]; /* LEFT/RIGHT virtual segments, not centers. */
     uint8_t corner_side,corner_kind;
@@ -106,6 +113,9 @@ typedef struct {
     uint8_t v_valid[2],v_misses[2];
     uint16_t rows,cols;
     uint8_t valid[2],misses[2];
+    ring_corner_point_t third_tip[2];
+    float third_slope[2];
+    uint8_t third_valid[2],third_misses[2];
 } ring_corner_tracker_t;
 
 /* Pure bounded per-frame geometry; must never alter binary or carry motion state.

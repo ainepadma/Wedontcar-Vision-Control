@@ -1,6 +1,6 @@
-version: "0.27.0"
+version: "0.28.0"
 date: "2026-11-07"
 branch: "1106-deng"
-commit: "最终补线"
+commit: "最终刹车和补线"
 commit_kind: "subject"
 base_commit: "98d91b5"
