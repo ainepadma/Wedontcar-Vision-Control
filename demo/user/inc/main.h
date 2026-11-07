@@ -5,6 +5,7 @@
 #include "imu_navigation.h"
 #include "ring_control.h"
 #include "track_stop_diagnostics.h"
+#include "track_stripe_brake.h"
 
 // 临时端点标定模式已关闭；设为1时电机强制为零，C12/C15以0.5度调节舵机。
 #define SERVO_CENTER_TEST_MODE 0
@@ -18,7 +19,7 @@
 // C13 / KEY_3 控制两个驱动电机；上电默认停止，按住上电不会启动。
 #define MOTOR_TOGGLE_KEY C13
 // C14 / KEY_2 控制视觉/环岛自动停车；赛道版上电默认关闭，可按 C14 开启。
-// 七条黑条到位停车、编码器反号、无反馈和超速保护始终有效；C13手动停机保留。
+// 编码器反号、无反馈和超速保护始终有效，C13手动停机和PWM硬限幅始终保留。
 #define PROTECTION_TOGGLE_KEY C14
 #define AUTOMATIC_PROTECTION_DEFAULT 0U
 // C15 / KEY_1 每按一次将普通档直道目标增加10.0f；重启恢复TRACK_SPEED_STRAIGHT。
@@ -29,8 +30,9 @@ extern volatile uint8_t motor_feedback_fault; // 1=左、2=右、3=两侧；原�
 extern volatile uint8_t protection_enabled;
 extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
-extern volatile uint8_t track_stripe_status; /* 0 search, 1 armed, 2 locked, 3 bypass */
 extern volatile uint8_t track_stop_reason;
+/* 0=searching, 1=ARMED, 2=locked until board reset. */
+extern volatile uint8_t track_stripe_brake_status;
 extern volatile track_stop_snapshot_t track_last_stop;
 extern volatile int32_t encoder_total_l, encoder_total_r;
 extern volatile int16_t track_servo_tenths;
@@ -39,7 +41,8 @@ extern ring_control_state_t ring_control;
 extern volatile uint8_t imu_device_status;
 void assistant_uart_tx_irq_handler(void);
 void track_runtime_init(void);
-void track_frame_publish(const track_vision_result_t *result);
+void track_frame_publish(const track_vision_result_t *result,
+                         const stripe_brake_observation_t *stripe);
 
 // 编码器引脚信息
 // 前进反馈须为正；DIR=LOW 实车正转触发 ENC ERR:3，修正两路反馈极性。

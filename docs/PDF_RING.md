@@ -1,3 +1,5 @@
+> 历史开发记录：以下参数、路径、旧出口条件和验证结论属于原版本；当前 0.27.0 以 [CHANGELOG](../CHANGELOG.md)、[环岛诊断](RING_DIAGNOSTICS.md)、[刹车说明](STRIPE_BRAKE.md) 为准。
+
 # 本次环岛视觉替换说明
 
 当前实现替换了运行时原 270/360 角点事件算法与旧 ZORE 残留，环岛入口在 track_ring_vision_process，几何在 ring_corner.c，状态选择在 ring_control.c。运动控制与 ISR 文件保持原压缩包内容。main.c 只修改视觉预览和叠加显示。

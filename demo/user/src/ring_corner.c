@@ -324,12 +324,83 @@ static ring_corner_point_t bridge_tip(unsigned h,unsigned w,unsigned side)
     }
     return tip;
 }
+/* Roof slope is measured on the broad MAIN white run in each column, not
+ * a tiny flat step beside A or a whole curved roof whose slopes cancel. */
+static int bridge_flat(const uint8_t *im,unsigned h,unsigned w,unsigned inner)
+{
+    float n=0,sx=0,sy=0,sxx=0,sxy=0;
+    for(unsigned u=w/20U;u<w*36U/100U;++u) {
+        unsigned x=inner ? w-1U-u : u,best=0,top=0,run=0,start=0;
+        for(unsigned y=0;y<=h;++y) {
+            if(y<h && im[y*w+x]) {if(!run) start=y;++run;}
+            else {if(run>best) {best=run;top=start;}run=0;}
+        }
+        if(best<h/8U || top>=h*7U/10U) continue;
+        ++n;sx+=u;sy+=top;sxx+=u*u;sxy+=u*top;
+    }
+    float den=n*sxx-sx*sx;
+    return n>w*.20f && den>1.f && fabsf((n*sxy-sx*sy)/den)<=.33f;
+}
+static void late_exit_features(const uint8_t *im,unsigned h,unsigned w,ring_corner_frame_t *f)
+{
+    unsigned run=0,start=0,required=(h+19U)/20U;
+    /* Wide mid-image passage: tolerate cropped black edge pixels. The band
+     * must have reached the middle, so the earlier upper mouth is not enough. */
+    for(unsigned y=h/3U;y<h*4U/5U;++y) {
+        unsigned longest=0,white_run=0;
+        for(unsigned x=0;x<w;++x) {
+            if(im[y*w+x]) {if(++white_run>longest) longest=white_run;}else white_run=0;
+        }
+        if(longest*100U>=w*95U) {if(!run) start=y;++run;}
+        else {run=0;}
+        if(run>=required && (start+y)*100U>=h*90U) f->exit_separator=1;
+    }
+    for(unsigned inner=0;inner<2;++inner)
+        f->bridge_ready[inner]=(uint8_t)(bridge_flat(im,h,w,inner) &&
+            (f->a[1U-inner].quality || f->bridge_tip[1U-inner].quality));
+    unsigned r=h/16U+5U;
+    for(unsigned trace_side=0;trace_side<2;++trace_side) for(unsigned i=r;i+r<length[trace_side];++i) {
+        float x=edge[trace_side][i][0],y=edge[trace_side][i][1];
+        float dx0=edge[trace_side][i-r][0]-x,dy0=edge[trace_side][i-r][1]-y;
+        float dx1=edge[trace_side][i+r][0]-x,dy1=edge[trace_side][i+r][1]-y;
+        /* Slanted V and one-horizontal-arm right angles are welcome. A <
+         * has both arms on the same x side; shallow roof stairs have no
+         * appreciably rising arm. Neither can establish the final exit. */
+        if(y<h*.15f || y>h*.85f || x<w*.06f || x>w*.94f || dx0*dx1>1.f ||
+           fabsf(dx0)+fabsf(dx1)<r*.50f ||
+           dy0>2.f || dy1>2.f || dy0+dy1>-(float)r*.30f ||
+           !((-dy0>=r*.30f && -dy0>=fabsf(dx0)*.55f) ||
+             (-dy1>=r*.30f && -dy1>=fabsf(dx1)*.55f))) continue;
+        unsigned above=0,below=0;
+        for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
+            above+=!im[((unsigned)y-3U+dy)*w+(unsigned)x+dx];
+            below+=!im[((unsigned)y+3U+dy)*w+(unsigned)x+dx];
+        }
+        if(above<5U || below>3U) continue;
+        int owner=-1;
+        unsigned up=(unsigned)y-r/2U,xx=(unsigned)x,left=xx,right=xx;
+        if(!im[up*w+xx]) {
+            while(left && !im[up*w+left-1U]) --left;
+            while(right+1U<w && !im[up*w+right+1U]) ++right;
+            if(xx-left>right-xx+w/25U) owner=0;
+            if(right-xx>xx-left+w/25U) owner=1;
+        }
+        for(unsigned side=0;side<2;++side) {
+            unsigned yy=(unsigned)y;
+            /* Assign by the actual boundary, never by image-centre x alone. */
+            if(owner>=0 ? (unsigned)owner!=side :
+               (!valid(side,yy) || fabsf(b[side][yy]-x)>w*.045f)) continue;
+            if(!f->exit_v[side].quality || y>f->exit_v[side].y)
+                f->exit_v[side]=point(x,y,RING_CORNER_B);
+        }
+    }
+}
 static void exit_connection(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
                             const ring_corner_frame_t *f,ring_corner_guide_t *g)
 {
     /* Fig 1.14 / user's p6: the CURRENT inner V closes the last fork down
      * to the CURRENT lower black boundary. No white-band or angle gate. */
-    ring_corner_point_t tip=f->v[inner];
+    ring_corner_point_t tip=f->exit_v[inner];
     if(!tip.quality || !valid(inner,h-2U) || tip.y>=h*.85f) return;
     segment(g,inner,tip.x,tip.y,b[inner][h-2U],h-1U);
     g->clip_upper=1;g->corner_side=(uint8_t)inner;g->corner_kind=RING_CORNER_B;
@@ -450,6 +521,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
     }
     if(connected->valid) *cross=*connected;
     for(unsigned side=0;side<2;++side) f->bridge_tip[side]=bridge_tip(h,w,side);
+    late_exit_features(im,h,w,f);
     for(unsigned side=0;side<2;++side) for(unsigned stage=1;stage<=7;++stage) {
         unsigned other=1-side;float outer=side ? w-1.f : 0.f;
         ring_corner_guide_t *g=&f->guide[ring_pdf_guide(stage,side)];
@@ -460,9 +532,10 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         if(stage==3 && v.quality) segment(g,other,v.x,v.y,b[other][h-2],h-1);
         if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);
         if(stage==5 || stage==6) {
-            if(f->bridge_tip[other].quality) bp=f->bridge_tip[other];
+            if(f->a[other].quality) bp=f->a[other];
+            else if(f->bridge_tip[other].quality) bp=f->bridge_tip[other];
         }
-        if((stage==5 || stage==6) && bp.quality) {
+        if((stage==5 || stage==6) && f->bridge_ready[side] && bp.quality) {
             /* User's exit sketch: close the local mouth from its lower outer
              * corner to the REAL upper cross-boundary, not an image corner.
              * Probe one quarter of the near lane width inward, then search

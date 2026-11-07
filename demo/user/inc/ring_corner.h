@@ -82,6 +82,8 @@ typedef struct {
     uint8_t quality[2],continuous[2],gap[2],bottom_open[2],paired;
     uint8_t entry[2],cross_entry;
     ring_corner_point_t a[2],p[2],v[2],breakpoint[2];
+    uint8_t bridge_ready[2],exit_separator;
+    ring_corner_point_t exit_v[2]; /* Direction-checked late exit; entry V unchanged. */
     ring_corner_point_t bridge_tip[2]; /* Late-ring mouth lips, separate from entry. */
     ring_corner_point_t mouth_upper[2],mouth_lower[2];
     uint8_t paired_mouth,v_reacquired;

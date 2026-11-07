@@ -17,3 +17,8 @@ demo/iar/program/settings/
 
 # OS
 
+
+# Local release artifacts and Python caches
+firmware/
+__pycache__/
+*.pyc

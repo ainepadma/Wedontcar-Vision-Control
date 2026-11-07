@@ -37,10 +37,15 @@ int main(int argc,char **argv){assert(argc==2);directory=argv[1];
  for(unsigned i=0;i<120;++i){process(1);assert(state.selected_path.valid);assert(state.corner_stage==3 || state.corner_stage==4);assert(state.corner_guide_id==13 || state.corner_guide_id==15);clipped();}
  puts("PASS p2:120 frames keep right entry continuation; all top-straight centre samples excluded");
  reset();step("entry",1);assert(state.corner_selected_guide.boundary[0].x0==112 && state.selected_path.error==-82);
- step("island",2);step("first_v",3);clipped();step("outer_v",4);clipped();step("bridge",5);process(30);assert(state.corner_stage==5);
- load("latest_p1");process(30);assert(state.corner_stage==5 && state.corner_guide_id==17);
- load("latest_p2");process(30);assert(state.corner_stage==5 && state.corner_guide_id==17);
- load("latest_p3");process(10);assert(state.corner_stage==7 && state.corner_guide_id==21);
+ step("island",2);step("first_v",3);clipped();step("outer_v",4);clipped();step("bridge",5);
+ load("timing_p3");process(30);assert(state.corner_stage==5 && state.corner_guide_id==0 && !state.separator_seen);
+ load("timing_p4");process(20);assert(state.corner_stage==5 && state.corner_guide_id==17);
+ assert(state.corner_selected_guide.boundary[1].x1==result.ring.corners.a[1].x);
+ assert(state.corner_selected_guide.boundary[1].y1==result.ring.corners.a[1].y);
+ load("timing_p1");process(20);assert(state.corner_stage==5 && state.corner_guide_id==17 && !state.separator_seen);
+ load("timing_p2");process(1);assert(state.corner_stage==6 && state.corner_guide_id==19 && state.separator_seen);
+ load("timing_p3");process(30);assert(state.corner_stage==6 && state.corner_guide_id!=21);
+ load("latest_p3");process(3);assert(state.corner_stage==7 && state.corner_guide_id==21);
  assert(state.corner_selected_guide.boundary[0].valid && !state.corner_selected_guide.boundary[1].valid);
  load("latest_p4");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
  load("latest_p5");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
@@ -48,6 +53,6 @@ int main(int argc,char **argv){assert(argc==2);directory=argv[1];
  process(3);assert(state.completed_360==0 && state.corner_stage==7);
  assert(state.selected_path.valid && state.path_mode==TRACK_PATH_STRAIGHT && !state.corner_guide_id);
  process(8);assert(state.completed_360==1 && state.phase==RING_STATE_COOLDOWN);
- puts("PASS third mouth stays repaired; final inner V connects left boundary without white band or timed steering; then aligned road settles 200ms");
+ puts("PASS third mouth stays repaired; one-frame separator then directional inner V connects left boundary without timed steering; then aligned road settles 200ms");
  reset();step("cross",1);assert(state.kind==TRACK_RING_270 && state.corner_guide_id==2);
  puts("PASS 270 bilateral recognition unchanged; initial entry geometry unchanged");return 0;}

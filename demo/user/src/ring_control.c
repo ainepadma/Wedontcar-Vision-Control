@@ -116,6 +116,7 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         s->kind=(uint8_t)kind;s->direction=side ? -1 : 1;s->action_locked=1;
         s->entry_passed=0;s->exit_seen=0;s->exit_gap_seen=0;
         s->bridge_seen=0;s->bridge_passed=0;s->exit_armed=0;s->bridge_clear_frames=0;
+        s->separator_seen=0;s->separator_frame=0;
         s->corner_have_guide=0;s->corner_guide_id=0;s->selected_path=invalid();
         s->exit_road_frames=0;
         s->entry_seen=1;s->event_started_ms=now;++s->event_id;stage(s,1,now);return;
@@ -139,32 +140,26 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
     case 2: if(confirmed(s,f->v[in].quality && !f->p[in].quality && f->continuous[out])) stage(s,3,now);break;
     case 3: if(confirmed(s,(!f->v[in].quality || (f->v_reacquired&(1U<<in))) && f->v[out].quality && !(f->v_reacquired&(1U<<out)) && f->v[out].y>f->rows*.25f)) stage(s,4,now);break;
     case 4: if(confirmed(s,f->paired && ((!f->v[out].quality || f->v[out].y<f->rows*.25f) ||
-        (!f->v[in].quality && f->bridge_tip[out].quality &&
+        (!f->v[in].quality && !f->a[in].quality && f->continuous[out] && f->bridge_tip[out].quality &&
          f->guide[ring_pdf_guide(5,in)].valid && f->guide[ring_pdf_guide(5,in)].boundary[out].valid)))) {
         stage(s,5,now);s->entry_passed=1;
     }break;
     case 5:
     case 6: {
-        /* The third repair owns this mouth until it has actually passed.
-         * Paired near borders alone occur WHILE the mouth is still visible. */
-        const ring_corner_guide_t *bridge=&f->guide[ring_pdf_guide(5,in)];
-        int visible=bridge->valid && bridge->boundary[out].valid;
-        if(visible) {
-            s->bridge_seen=1;s->bridge_clear_frames=0;
-            if((f->bridge_tip[out].quality && f->bridge_tip[out].y>=f->rows*.50f) ||
-               (!f->bridge_tip[out].quality && f->breakpoint[out].y>=f->rows*.50f)) s->bridge_passed=1;
-        } else if(s->bridge_seen && f->continuous[out]) {
-            if(s->bridge_clear_frames<255U) ++s->bridge_clear_frames;
-        } else s->bridge_clear_frames=0;
-        /* A new inner exit V plus intact outer road proves the previous
-         * right mouth is gone even when fast motion skipped its near rows. */
-        int exit_visible=!visible && f->continuous[out] && f->guide[ring_pdf_guide(7,in)].valid;
-        if(s->corner_stage==5) {
-            if(s->bridge_seen && s->bridge_clear_frames>=RING_CLEAR_FRAMES &&
-               (s->bridge_passed || exit_visible)) {
-                s->exit_gap_seen=1;s->exit_armed=1;stage(s,6,now);
-            }
-        } else if(confirmed(s,s->exit_armed && exit_visible)) stage(s,7,now);
+        unsigned out_guide=ring_pdf_guide(5,in);
+        int visible=f->guide[out_guide].valid && f->guide[out_guide].boundary[out].valid;
+        if(visible) s->bridge_seen=1;
+        /* A separator is remembered for this ring only AFTER third repair.
+         * Its own frame always stays on the third repair, even with a V. */
+        if(s->bridge_seen && !s->separator_seen && f->exit_separator) {
+            s->separator_seen=1;s->separator_frame=f->frame_number;
+            s->bridge_passed=1;s->exit_armed=1;
+            if(s->corner_stage==5) stage(s,6,now);
+            break;
+        }
+        int exit_visible=s->separator_seen && f->frame_number!=s->separator_frame &&
+            f->exit_v[in].quality && f->guide[ring_pdf_guide(7,in)].valid;
+        if(s->corner_stage==6 && confirmed(s,exit_visible)) stage(s,7,now);
         break;
     }
     case 7:
@@ -203,7 +198,8 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
         unsigned next=ring_pdf_guide(4,s->direction==1 ? 0U : 1U);
         if(f->guide[next].valid) id=next;
     }
-    if(s->kind==TRACK_RING_360 && s->corner_stage==6 && s->exit_armed &&
+    if(s->kind==TRACK_RING_360 && s->corner_stage==6 && s->exit_armed && s->separator_seen &&
+       f->frame_number!=s->separator_frame && f->exit_v[s->direction==1 ? 0U : 1U].quality &&
        !f->guide[id].boundary[s->direction==1 ? 1U : 0U].valid &&
        f->guide[ring_pdf_guide(7,s->direction==1 ? 0U : 1U)].valid)
         id=ring_pdf_guide(7,s->direction==1 ? 0U : 1U);

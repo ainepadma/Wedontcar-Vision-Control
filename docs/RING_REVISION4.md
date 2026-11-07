@@ -1,3 +1,5 @@
+> 历史开发记录：以下参数、路径、旧出口条件和验证结论属于原版本；当前 0.27.0 以 [CHANGELOG](../CHANGELOG.md)、[环岛诊断](RING_DIAGNOSTICS.md)、[刹车说明](STRIPE_BRAKE.md) 为准。
+
 # 第四轮视觉修复与验证
 
 当前工程 E:\Wedontcar-Vision-Control-1101-yubao；Downloads 内层同名工程同步。本说明优先于之前版本。

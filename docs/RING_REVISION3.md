@@ -1,3 +1,5 @@
+> 历史开发记录：以下参数、路径、旧出口条件和验证结论属于原版本；当前 0.27.0 以 [CHANGELOG](../CHANGELOG.md)、[环岛诊断](RING_DIAGNOSTICS.md)、[刹车说明](STRIPE_BRAKE.md) 为准。
+
 # 本轮中线、误补线及环岛状态修复
 
 工程位置：E:\Wedontcar-Vision-Control-1101-yubao；Downloads同名工程同步视觉源码。当前说明优先于之前两轮。

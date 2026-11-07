@@ -46,7 +46,8 @@ typedef struct {
     uint8_t vote_frames,vote_kind,vote_side,clear_frames,transition_frames,exit_gap_seen;
     uint8_t have_frame,have_tick,fault_resume_phase;
     uint8_t bridge_seen,bridge_passed,exit_armed,bridge_clear_frames;
-    uint8_t exit_road_frames;
+    uint8_t exit_road_frames,separator_seen;
+    uint32_t separator_frame;
     uint32_t exit_road_started_ms;
     uint32_t corner_frame_number,corner_guide_frame_number,corner_last_guide_ms;
     uint32_t last_frame_ms,last_tick_ms,event_started_ms,phase_started_ms,event_id;
