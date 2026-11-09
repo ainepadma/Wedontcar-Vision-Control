@@ -50,9 +50,10 @@ int main(int argc,char **argv){assert(argc==2);directory=argv[1];
  load("latest_p4");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
  load("latest_p5");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
  memset(image,0,sizeof(image));for(unsigned y=0;y<154;++y) memset(image+y*304+90,255,124);
- process(3);assert(state.completed_360==0 && state.corner_stage==7);
- assert(state.selected_path.valid && state.path_mode==TRACK_PATH_STRAIGHT && !state.corner_guide_id);
- process(8);assert(state.completed_360==1 && state.phase==RING_STATE_COOLDOWN);
+ process(1);assert(ring_control_path_source(&state)==RING_SOURCE_HOLD && !state.exit_road_frames);
+ process(2);assert(state.completed_360==0 && state.corner_stage==7 && state.exit_road_frames==2);
+ assert(state.selected_path.valid && state.path_mode==TRACK_PATH_NORMAL && !state.corner_guide_id);
+ process(9);assert(state.completed_360==1 && state.phase==RING_STATE_COOLDOWN);
  puts("PASS third mouth stays repaired; one-frame separator then directional inner V connects left boundary without timed steering; then aligned road settles 200ms");
  reset();step("cross",1);assert(state.kind==TRACK_RING_270 && state.corner_guide_id==2);
  puts("PASS 270 bilateral recognition unchanged; initial entry geometry unchanged");return 0;}

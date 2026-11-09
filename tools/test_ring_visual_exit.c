@@ -21,11 +21,45 @@ int main(void){for(unsigned in=0;in<2;++in){
  o.corners.exit_separator=0;o.corners.exit_v[in].quality=0;
  for(unsigned i=0;i<30;++i){step();}assert(s.corner_stage==6&&s.separator_seen); /* one frame is enough */
  o.corners.exit_v[in].quality=90;
+ /* Same-side tips at opposite positions in the exit mouth cannot cast
+  * consecutive votes for one vertex. The third line is gone, so this also
+  * checks that the first visible fourth line is not borrowed during S6. */
  for(unsigned stage=5;stage<=6;++stage)memset(&o.corners.guide[ring_pdf_guide(stage,in)],0,sizeof(ring_corner_guide_t));
- for(unsigned i=0;i<3;++i){step();}assert(s.corner_stage==7&&s.selected_path.error==150);
+ for(unsigned i=0;i<6;++i){
+     float x=i%2U ? 125.f : 40.f;
+     o.corners.exit_v[in].x=in ? 303.f-x : x;
+     o.corners.exit_v[in].y=80.f;
+     step();
+     assert(s.corner_stage==6 && s.corner_guide_id!=ring_pdf_guide(7,in));
+ }
+ o.corners.exit_v[in].quality=0;step(); /* Restart the confirmation sequence. */
+ o.corners.exit_v[in].quality=90;
+ o.corners.road_clear=1; /* Even a ready straight must not steal the switch frame. */
+ for(unsigned i=0;i<3;++i){
+     float x=60.f+i*2.f;
+     o.corners.exit_v[in].x=in ? 303.f-x : x;
+     o.corners.exit_v[in].y=80.f+i;
+     step();
+     if(i<2) assert(s.corner_stage==6 && s.corner_guide_id!=ring_pdf_guide(7,in));
+ }
+ assert(s.corner_stage==7 && s.selected_path.error==150 && !s.exit_road_frames);
  assert(ring_control_path_source(&s)==RING_SOURCE_GUIDE);
+ o.corners.road_clear=0;
  guide(5,in,-800);guide(6,in,-800);step();assert(s.corner_stage==7&&s.selected_path.error==150);
+ /* A competing tip on the same side must not pull the fourth repair
+  * across the image. Within the old tip's lifetime we can still recover it. */
+ o.corners.exit_v[in].x=in ? 178.f : 125.f;
+ guide(7,in,-400);step();
+ assert(ring_control_path_source(&s)==RING_SOURCE_HOLD && s.selected_path.error==150);
+ o.corners.exit_v[in].x=in ? 237.f : 66.f;
+ guide(7,in,165);step();
+ assert(ring_control_path_source(&s)==RING_SOURCE_GUIDE && s.selected_path.error==165);
  memset(&o.corners.guide[ring_pdf_guide(7,in)],0,sizeof(ring_corner_guide_t));step();assert(s.corner_guide_held);
  for(unsigned i=0;i<7;++i){step();}assert(!s.selected_path.valid);
+ /* After expiry a new vertex needs fresh confirmation, even in S7. */
+ o.corners.exit_v[in].x=in ? 178.f : 125.f;guide(7,in,-400);
+ step();assert(!s.selected_path.valid);
+ step();assert(!s.selected_path.valid);
+ step();assert(ring_control_path_source(&s)==RING_SOURCE_GUIDE && s.selected_path.error==-400);
  ring_control_init(&s);assert(!s.separator_seen&&!s.separator_frame);
- }puts("PASS separator only after third; own frame stays right; duplicate/new-frame distinction; one-frame latch; V still required; mirrored order, bounded hold and reset");return 0;}
+ }puts("PASS mirrored separator order, same-tip confirmation, fourth-line hold and reacquisition");return 0;}

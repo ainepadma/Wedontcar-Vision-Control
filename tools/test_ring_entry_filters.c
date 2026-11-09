@@ -28,6 +28,14 @@ int main(int argc,char **argv)
 {
     assert(argc==3);
     int expected_entry=atoi(argv[2]);
+    /* Two equal runs around the anchor must leave the row unobserved. */
+    memset(test_image,0,sizeof(test_image));
+    for(unsigned y=0;y<154;++y) {
+        memset(test_image+y*304+40,255,60);
+        memset(test_image+y*304+204,255,60);
+    }
+    ring_corner_process(test_image,154,304,0,&test_frame);
+    assert(flags[100]==0 && b[0][100]==0 && b[1][100]==303);
     block(40,30,40,30);assert(supported(0,80,45));
     block(0,30,40,30);assert(supported(0,40,45)==!RING_ENTRY_REQUIRE_CLOSED_ISLAND);
     block(264,30,40,30);assert(supported(1,263,45)==!RING_ENTRY_REQUIRE_CLOSED_ISLAND);
