@@ -497,8 +497,23 @@ static void exit_connection(const uint8_t *im,unsigned h,unsigned w,unsigned inn
     /* Fig 1.14 / user's p6: the CURRENT inner V closes the last fork down
      * to the CURRENT lower black boundary. No white-band or angle gate. */
     ring_corner_point_t tip=f->exit_v[inner];
-    if(!tip.quality || !valid(inner,h-2U) || tip.y>=h*.85f) return;
-    segment(g,inner,tip.x,tip.y,b[inner][h-2U],h-1U);
+    if(!tip.quality || tip.y>=h*.85f) return;
+    unsigned row=h-2U,end=h-1U;
+    if(!valid(inner,row)) {
+        /* A clipped bottom row can hide the anchor. Only accept a continuous
+         * real border within the bottom 5% of this frame; never extend a
+         * substitute segment through the missing rows. */
+        unsigned first=h-2U-(h+19U)/20U;
+        int max_step=(int)(w/40U+2U);
+        for(--row;row>=first;--row) {
+            if(valid(inner,row) && valid(inner,row-1U) && valid(inner,row-2U) &&
+               abs((int)b[inner][row]-b[inner][row-1U])<=max_step &&
+               abs((int)b[inner][row-1U]-b[inner][row-2U])<=max_step) break;
+        }
+        if(row<first || row<tip.y+2.f) return;
+        end=row;
+    }
+    segment(g,inner,tip.x,tip.y,b[inner][row],end);
     g->clip_upper=1;g->corner_side=(uint8_t)inner;g->corner_kind=RING_CORNER_B;
     g->corner_x=tip.x;g->corner_y=tip.y;
     finish(im,h,w,g);
@@ -559,8 +574,13 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
             int r=x-1;
             if(r-l<(int)w/25) continue;
             float dist=anchor<l ? l-anchor : (anchor>r ? anchor-r : 0);
-            float score=dist*4+fabsf((l+r)*.5f-anchor)*.1f;
+            /* Scale the score by ten so half-pixel ties compare exactly. */
+            float score=dist*40+fabsf((l+r)*.5f-anchor);
             if(score<best) {best=score;bl=l;br=r;found=1;}
+            else if(score==best) {
+                /* No unique road on this row. Keep the previous anchor. */
+                bl=0;br=w-1;found=0;
+            }
         }
         b[0][y]=(uint16_t)bl;b[1][y]=(uint16_t)br;
         if(found) {
@@ -576,7 +596,8 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         trace(im,h,w,side,seed[side],seed_y,f);features(h,w,side,f);
     }
     for(unsigned side=0;side<2;++side) {
-        if(f->p[side].quality && (side ? f->p[side].x<w*.5f : f->p[side].x>w*.5f))
+        float center=(w-1)*.5f;
+        if(f->p[side].quality && (side ? f->p[side].x<center : f->p[side].x>center))
             memset(&f->p[side],0,sizeof(f->p[side]));
     }
     /* A contour may traverse the whole roof after the two tracers meet.

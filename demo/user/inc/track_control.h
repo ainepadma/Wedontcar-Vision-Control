@@ -5,9 +5,9 @@
 
 /* Encoder counts per 10-ms tick. The nominal m/s estimates below use the
  * hand-measured 2904.25 counts/revolution and a 64-mm wheel diameter. */
-#define TRACK_SPEED_STRAIGHT 90.0f
+#define TRACK_SPEED_STRAIGHT 120.0f
 /* LOW档弯道最低目标与无有效图像时的兜底目标。 */
-#define TRACK_SPEED_CURVE_MIN 70.0f
+#define TRACK_SPEED_CURVE_MIN 90.0f
 /* FULL档：直道约1.75 m/s，弯道最低约1.00 m/s（架空轮速估算）。 */
 #define TRACK_SPEED_FULL_STRAIGHT 253.0f
 #define TRACK_SPEED_FULL_CURVE_MIN 145.0f
