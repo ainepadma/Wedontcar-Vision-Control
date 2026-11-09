@@ -67,6 +67,25 @@ static float servo_center_test_angle = SERVO_MOTOR_CENTER;
 static motor_feedback_watchdog_t motor_feedback_watchdog;
 static motor_overspeed_watchdog_t motor_overspeed_watchdog;
 static track_control_state_t track_control;
+volatile uint8_t track_stripe_brake_status;
+static stripe_brake_state_t stripe_brake;
+static float stripe_brake_servo_angle;
+
+/* Only the stripe stop uses signed drive. Zero PWM before changing DIR. */
+static void stripe_brake_apply(int16_t left, int16_t right)
+{
+    pwm_set_duty(MOTOR1_PWM, 0U);
+    pwm_set_duty(MOTOR2_PWM, 0U);
+    gpio_set_level(MOTOR1_DIR, left < 0 ? !MOTOR1_FORWARD_DIR_LEVEL : MOTOR1_FORWARD_DIR_LEVEL);
+    gpio_set_level(MOTOR2_DIR, right < 0 ? !MOTOR2_FORWARD_DIR_LEVEL : MOTOR2_FORWARD_DIR_LEVEL);
+    pwm_set_duty(MOTOR1_PWM, (uint32_t)(left < 0 ? -(int32_t)left : left));
+    pwm_set_duty(MOTOR2_PWM, (uint32_t)(right < 0 ? -(int32_t)right : right));
+    /* Existing telemetry uses unsigned PWM magnitudes; DIR carries polarity. */
+    speed_pwm_l = (float)(left < 0 ? -(int32_t)left : left);
+    speed_pwm_r = speed_pwm = (float)(right < 0 ? -(int32_t)right : right);
+    /* Keep the last commanded angle energized; do not release the servo. */
+    pwm_set_duty(SERVO_MOTOR_PWM, (uint32_t)SERVO_MOTOR_DUTY(stripe_brake_servo_angle));
+}
 static volatile uint32_t control_clock_ms;
 static uint32_t consumed_frame_generation;
 static int16_t log_path_error, log_path_heading;
@@ -83,6 +102,7 @@ static volatile struct
     uint8_t confidence, valid, ring_candidate;
     int8_t ring_direction;
     track_ring_observation_t ring;
+    stripe_brake_observation_t stripe;
     uint32_t observed_ms, generation, frame_number;
 } track_mailbox;
 
@@ -99,6 +119,9 @@ void track_runtime_init(void)
         .max_servo_rate_deg_s = TRACK_SERVO_RATE_DEG_S
     };
     track_control_init(&track_control, &config);
+    stripe_brake_init(&stripe_brake);
+    track_stripe_brake_status = 0U;
+    stripe_brake_servo_angle = SERVO_MOTOR_CENTER;
     ring_control_init(&ring_control);
     protection_switch_state.enabled = AUTOMATIC_PROTECTION_DEFAULT;
     speed_mode_switch_state.enabled = 0U;
@@ -119,10 +142,12 @@ void track_runtime_init(void)
     track_servo_tenths = (int16_t)(track_control.servo_angle * 10.0f);
 }
 
-void track_frame_publish(const track_vision_result_t *result)
+void track_frame_publish(const track_vision_result_t *result,
+                         const stripe_brake_observation_t *stripe)
 {
     // 临界区复制结构化观测和候选路径；不复制像素、不计算几何或执行IO。
     uint32_t primask = interrupt_global_disable();
+    track_mailbox.stripe = *stripe;
     track_mailbox.error = result->error;
     track_mailbox.frame_number = result->frame_number;
     track_mailbox.heading = result->heading;
@@ -215,7 +240,7 @@ void PIT_IRQHandler(void)
             speed_full_enabled = 0U;
 #endif
         }
-        if (button_pressed)
+        if (button_pressed && !stripe_brake.stopped)
         {
             motor_feedback_fault = 0;
             /* C13 intent is based on the state at tick entry. If a protection
@@ -334,11 +359,27 @@ void PIT_IRQHandler(void)
                           ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
                 fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
         }
+        /* Stripe brake is active even before C13, independent of C14. */
+        uint8_t stripe_just_latched = 0U;
+#if !SERVO_CENTER_TEST_MODE && !SPEED_BENCH_MODE
+        const stripe_brake_observation_t stripe_observation = track_mailbox.stripe;
+        if (fresh_ring_frame && !stripe_brake.stopped &&
+            stripe_brake_observe(&stripe_brake, &stripe_observation,
+                                 track_mailbox.observed_ms, control_clock_ms))
+        {
+            stripe_just_latched = 1U;
+            stripe_brake_servo_angle = track_control.servo_angle;
+            Pid_Reset(&speed_pid_l);
+            Pid_Reset(&speed_pid_r);
+        }
+#endif
+        track_stripe_brake_status = stripe_brake.stopped ? 2U : (stripe_brake.armed ? 1U : 0U);
         if (protection_enabled && ring_control.fault)
             track_control_stop(&track_control, TRACK_STOP_RING);
+        /* This runs every control tick, even with no camera frame or C13. */
+        if (stripe_brake.stopped)
+            track_control_stop(&track_control, TRACK_STOP_STRIPE);
         track_control_output_t output = track_control_tick(&track_control, control_clock_ms);
-        if (ring_control_straight_active(&ring_control, control_clock_ms))
-            track_control_force_straight(&track_control, &output);
         if (ring_control_guidance_active(&ring_control) &&
             output.target_speed > TRACK_SPEED_CURVE_MIN)
             output.target_speed = TRACK_SPEED_CURVE_MIN;
@@ -351,7 +392,7 @@ void PIT_IRQHandler(void)
         output.servo_angle = SERVO_MOTOR_CENTER;
 #endif
         /* Capture BEFORE PWM/targets are cleared. Does not change stop policy. */
-        track_stop_record(&track_last_stop,was_running,output.running,output.stop_reason,
+        track_stop_record(&track_last_stop,(uint8_t)(was_running || stripe_just_latched),output.running,output.stop_reason,
             motor_feedback_fault,protection_enabled,control_clock_ms,
             encoder_data_1,encoder_data_2,speed_target,speed_pwm_l,speed_pwm_r);
         motor_enabled = output.running;
@@ -400,7 +441,19 @@ void PIT_IRQHandler(void)
         }
 
         float log_target_left = 0.0f, log_target_right = 0.0f;
-        if (motor_enabled)
+        if (stripe_brake.stopped)
+        {
+            /* Capture the stop position now; use current speed for immediate
+             * damping, without counting pre-trigger motion as displacement. */
+            const int16_t left = stripe_brake_hold(&stripe_brake, 0U,
+                encoder_data_1, stripe_just_latched);
+            const int16_t right = stripe_brake_hold(&stripe_brake, 1U,
+                encoder_data_2, stripe_just_latched);
+            speed_target = 0.0f;
+            track_servo_tenths = (int16_t)(stripe_brake_servo_angle * 10.0f);
+            stripe_brake_apply(left, right);
+        }
+        else if (motor_enabled)
         {
 #if SERVO_CENTER_TEST_MODE
             // 标定期间只给舵机中值脉冲，禁止任何电机驱动。

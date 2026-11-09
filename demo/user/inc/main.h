@@ -5,6 +5,7 @@
 #include "imu_navigation.h"
 #include "ring_control.h"
 #include "track_stop_diagnostics.h"
+#include "track_stripe_brake.h"
 
 // 临时端点标定模式已关闭；设为1时电机强制为零，C12/C15以0.5度调节舵机。
 #define SERVO_CENTER_TEST_MODE 0
@@ -30,6 +31,8 @@ extern volatile uint8_t protection_enabled;
 extern volatile uint8_t speed_full_enabled;
 extern volatile uint8_t track_ready;
 extern volatile uint8_t track_stop_reason;
+/* 0=searching, 1=ARMED, 2=locked until board reset. */
+extern volatile uint8_t track_stripe_brake_status;
 extern volatile track_stop_snapshot_t track_last_stop;
 extern volatile int32_t encoder_total_l, encoder_total_r;
 extern volatile int16_t track_servo_tenths;
@@ -38,7 +41,8 @@ extern ring_control_state_t ring_control;
 extern volatile uint8_t imu_device_status;
 void assistant_uart_tx_irq_handler(void);
 void track_runtime_init(void);
-void track_frame_publish(const track_vision_result_t *result);
+void track_frame_publish(const track_vision_result_t *result,
+                         const stripe_brake_observation_t *stripe);
 
 // 编码器引脚信息
 // 前进反馈须为正；DIR=LOW 实车正转触发 ENC ERR:3，修正两路反馈极性。

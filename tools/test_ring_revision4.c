@@ -37,23 +37,22 @@ int main(int argc,char **argv){assert(argc==2);directory=argv[1];
  for(unsigned i=0;i<120;++i){process(1);assert(state.selected_path.valid);assert(state.corner_stage==3 || state.corner_stage==4);assert(state.corner_guide_id==13 || state.corner_guide_id==15);clipped();}
  puts("PASS p2:120 frames keep right entry continuation; all top-straight centre samples excluded");
  reset();step("entry",1);assert(state.corner_selected_guide.boundary[0].x0==112 && state.selected_path.error==-82);
- step("island",2);step("first_v",3);clipped();step("outer_v",4);clipped();step("bridge",5);process(3);assert(state.corner_stage==6);
- load("p1");process(3);assert(state.corner_stage==6 && !result.ring.corners.exit_white_band && state.corner_guide_id==0);
- for(unsigned i=0;i<60;++i){
-  result.ring.corners.v[0].quality=90;result.ring.corners.v[0].x=60;result.ring.corners.v[0].y=70;result.ring.corners.v_reacquired=0;
-  result.ring.corners.frame_number=++frame;ring_control_observe(&state,&result.ring,frame*20,1);ring_control_select_path(&state,&result.ring);
-  assert(state.corner_stage==6 && !state.exit_armed && state.corner_guide_id==0);
- }
- puts("PASS p1 without white band stays S6 even with repeated false inner V; never S7/G21");
- memset(image,0,sizeof(image));for(unsigned y=0;y<154;++y) memset(image+y*304+90,255,124);process(5);
- assert(state.corner_stage==6 && !state.exit_armed);
- for(unsigned y=60;y<100;++y) memset(image+y*304,255,304);
- process(3);assert(state.corner_stage==7 && state.exit_armed && state.corner_guide_id==21);
- assert(state.corner_selected_guide.boundary[1].valid && !state.corner_selected_guide.boundary[0].valid);
+ step("island",2);step("first_v",3);clipped();step("outer_v",4);clipped();step("bridge",5);
+ load("timing_p3");process(30);assert(state.corner_stage==5 && state.corner_guide_id==0 && !state.separator_seen);
+ load("timing_p4");process(20);assert(state.corner_stage==5 && state.corner_guide_id==17);
+ assert(state.corner_selected_guide.boundary[1].x1==result.ring.corners.a[1].x);
+ assert(state.corner_selected_guide.boundary[1].y1==result.ring.corners.a[1].y);
+ load("timing_p1");process(20);assert(state.corner_stage==5 && state.corner_guide_id==17 && !state.separator_seen);
+ load("timing_p2");process(1);assert(state.corner_stage==6 && state.corner_guide_id==19 && state.separator_seen);
+ load("timing_p3");process(30);assert(state.corner_stage==6 && state.corner_guide_id!=21);
+ load("latest_p3");process(3);assert(state.corner_stage==7 && state.corner_guide_id==21);
+ assert(state.corner_selected_guide.boundary[0].valid && !state.corner_selected_guide.boundary[1].valid);
+ load("latest_p4");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
+ load("latest_p5");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
  memset(image,0,sizeof(image));for(unsigned y=0;y<154;++y) memset(image+y*304+90,255,124);
  process(3);assert(state.completed_360==0 && state.corner_stage==7);
  assert(state.selected_path.valid && state.path_mode==TRACK_PATH_STRAIGHT && !state.corner_guide_id);
  process(8);assert(state.completed_360==1 && state.phase==RING_STATE_COOLDOWN);
- puts("PASS final exit requires white band, A diagonal, then aligned road settled 200ms; handoff observations propagated");
+ puts("PASS third mouth stays repaired; one-frame separator then directional inner V connects left boundary without timed steering; then aligned road settles 200ms");
  reset();step("cross",1);assert(state.kind==TRACK_RING_270 && state.corner_guide_id==2);
  puts("PASS 270 bilateral recognition unchanged; initial entry geometry unchanged");return 0;}

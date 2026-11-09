@@ -5,9 +5,9 @@
 
 /* Encoder counts per 10-ms tick. The nominal m/s estimates below use the
  * hand-measured 2904.25 counts/revolution and a 64-mm wheel diameter. */
-#define TRACK_SPEED_STRAIGHT 120.0f
+#define TRACK_SPEED_STRAIGHT 90.0f
 /* LOW档弯道最低目标与无有效图像时的兜底目标。 */
-#define TRACK_SPEED_CURVE_MIN 90.0f
+#define TRACK_SPEED_CURVE_MIN 70.0f
 /* FULL档：直道约1.75 m/s，弯道最低约1.00 m/s（架空轮速估算）。 */
 #define TRACK_SPEED_FULL_STRAIGHT 253.0f
 #define TRACK_SPEED_FULL_CURVE_MIN 145.0f
@@ -22,7 +22,8 @@ typedef enum
     TRACK_STOP_ENCODER,
     TRACK_STOP_NO_FEEDBACK,
     TRACK_STOP_OVERSPEED,
-    TRACK_STOP_RING
+    TRACK_STOP_RING,
+    TRACK_STOP_STRIPE
 } track_control_stop_reason_t;
 
 typedef struct
@@ -102,7 +103,5 @@ void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled);
 void track_control_stop(track_control_state_t *state, uint8_t reason);
 track_control_output_t track_control_tick(track_control_state_t *state,
                                          uint32_t now_ms);
-/* Explicit bounded S7 manoeuvre. Preserve speed and stop decisions. */
-void track_control_force_straight(track_control_state_t *state,track_control_output_t *output);
 
 #endif

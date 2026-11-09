@@ -1,6 +1,6 @@
-# 0.25.0 转向缓存与CSV导出
+# 0.28.0 转向缓存与CSV导出
 
-本功能记录控制数值，不记录图像、不测量舵机物理角度。0.23.0增加环岛细分诊断及S3路线保持；0.24.0引入S6/S7白带出口规则，0.24.1改为反侧A点起线及竖直60°；沿用33列格式，exit_armed改为白带有效补线确认标志，bridge两列仅保留S5诊断。0.25.0新增S7真实外侧角触发的300ms直行及稳定交接，ring_source=4表示T，servo10=870表示中位指令；保持33列，未添加实测边界角列，请结合屏幕O值。详见[RING_DIAGNOSTICS](RING_DIAGNOSTICS.md)。
+本功能只记录控制数值，不测量舵机物理角度。当前无T强制直行：来源0=N/1=G/2=H/3=U；旧CSV的4=T只作历史兼容。exit_armed为白横带分隔已经锁存后的出口解锁。CSV沿用33列，新增条纹停车原因9，协议没有新增DIR正负字段。FW=0.28.0。
 
 ## 使用流程
 
@@ -36,25 +36,25 @@
 | error / heading | 实际送入循迹控制的所选路线偏差/航向，归一化单位，正值朝右 |
 | near_error / near_heading / bottom_error | 该视觉邮箱近端/底部原始观察值；无有效观察时不可单独解释 |
 | filtered_error / filtered_heading | 控制器滤波后的值，整数截断 |
-| servo10 | 最终限幅/限速后的舵机指令角×10；870是87°，不是实测角。running=0时舵机PWM关闭，此字段仅为控制器保留指令 |
+| servo10 | 最终限幅/限速后的舵机指令角×10；870是87°，不是实测角。普通停机时舵机PWM关闭；原因9条纹锁停时持续输出触发瞬间角度，字段仍非实测角 |
 | target_left10 / target_right10 | 差速、加速斜坡之后送入左右速度PI的目标×10，基础单位计数/10ms |
 | speed_left / speed_right | 当前10ms编码器增量；虽每20ms记录，不能当作20ms累计路程 |
-| pwm_left / pwm_right | 送往两轮的PWM占空比指令，10000对应100%；停车末条为0 |
-| running / ready / stop_reason | 运行、就绪、停车原因，原因编号沿用track_control.h（0–8） |
+| pwm_left / pwm_right | 送往两轮的PWM幅值，10000对应100%；普通停车末条为0，条纹位置保持可非零；此字段没有DIR正负 |
+| running / ready / stop_reason | 运行、就绪、停车原因，原因编号沿用track_control.h（0–9） |
 | confidence / valid | 所选路线置信度、控制器帧有效标志；应结合frame_age_ms判断是否过时 |
 | ring_phase / ring_kind | 当前ring_control内部枚举值，不是角度270/360本身；解释以该版本头文件为准 |
 | protection | C14当前视觉/环岛保护开关 |
 | ring_stage / ring_guide / ring_source / ring_direction | 实际细分阶段、补线编号、来源0=N/1=G/2=H/3=U、内侧方向1左/-1右 |
 | bridge_seen / bridge_passed / exit_armed / transition_frames | 路口已见/已通过、出口解锁、转换连续确认计数 |
 
-停车前最后一次50Hz样本可能早于故障10–20ms；末条保存关闭后的实际目标/PWM。既有`track_last_stop`保留关闭前诊断，未改动。
+停车前最后一次50Hz样本可能早于故障10–20ms；普通停车末条保存归零后的目标/PWM；条纹锁停目标为0但PWM可能为保持力输出。LAST保留触发前快照，未按C13时锁停也可生成LAST，不代表产生了完整行驶CSV。
 
 ## 协议与完整性
 
-2026-11-05用户反馈出环仍有偏转，本轮尚未取得对应CSV。后续优先导出并对齐S7、ring_source=4、servo10=870、frame_age_ms及T结束后的G/N/H/U变化；日志中未存储实测边界角，需配合屏幕O值。当前不把中位指令等同于实车沿直线。
+历史2026-11-05出环偏转尚未实车验收；当前排查对齐S阶段、G编号、N/G/H/U来源、servo10、frame_age_ms和中线有效性。当前没有T计时直行，不把中位指令等同于实车沿直线。
 
 - 请求`LOG\n`；运行时回复`#LOG ERROR RUNNING`，尚无记录回复`#LOG ERROR EMPTY`。关闭C12时不响应导出。
-- 起始`#LOG BEGIN session count overwritten FW=0.25.0`，随后CSV表头与数据行。
+- 起始`#LOG BEGIN session count overwritten FW=0.28.0`，随后CSV表头与数据行。
 - 结束`#LOG END session count fnv1a`。FNV-1a 32位覆盖所有数据行原始ASCII字节（含CRLF），不含表头；用于传输差错检测，不是安全签名。
 - 使用现有UART中断发送队列，导出期间暂停摄像头图传/示波器输出，不混发二进制图像；屏幕和图像识别仍正常执行。
 - 主循环仅在短临界区读取元信息或一条56字节记录。CSV格式化和串口发送均在临界区外。新启动改变session，旧导出以`ABORT RESTART`终止。
@@ -70,12 +70,12 @@
 - `tools/test_steering_log.c`：频率、覆盖、停止、会话、时钟回绕和CSV测试。
 - `tools/test_steering_export.py`：提取实际固件导出函数，在主机模拟UART并与Python解析器联测。
 
-0.22.0首次实现记录见CHANGELOG；当前0.25.0的验证见对应版本条目。未烧录、未连接串口，SDRAM实车长期记录、实际50Hz时序开销、下载器重连是否引发复位、满缓存导出耗时仍需验证。
+0.22.0首次实现记录见CHANGELOG；当前版本验证见本版CHANGELOG。未烧录、未连接串口，SDRAM实车长期记录、实际50Hz时序开销、下载器重连是否引发复位、满缓存导出耗时仍需验证。
 
 ## 上车验收（后续授权烧录后）
 
 1. 停机开机导出应提示EMPTY；不影响C13正常启停。
-2. 短跑/架空启停后导出，检查首尾running、停车原因、87°中值对应870，两轮末条PWM=0。
+2. 短跑/架空启停后导出，检查首尾running、停车原因、87°中值对应870，普通停机两轮末条PWM=0；条纹锁停则单独验证保持PWM和舵机不释放。
 3. 查看常规记录间隔20ms、frame递增或重复合理、未更新图像时frame_age_ms增加。
 4. 关闭C12记录后再开启导出；核对记录没有中断。
 5. 分别检查手动停车与原有保护停车能冻结；不要为测试日志额外制造堵转。

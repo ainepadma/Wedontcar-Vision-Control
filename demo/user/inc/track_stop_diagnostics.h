@@ -16,7 +16,7 @@ static inline void track_stop_record(volatile track_stop_snapshot_t *record,
     uint8_t protection, uint32_t ms, int16_t left, int16_t right,
     float target, float left_pwm, float right_pwm)
 {
-    if (!was_running || running || reason < TRACK_STOP_NOT_READY || reason > TRACK_STOP_RING)
+    if (!was_running || running || reason < TRACK_STOP_NOT_READY || reason > TRACK_STOP_STRIPE)
         return;
     record->ms=ms;record->reason=reason;record->wheels=wheels;
     record->protection=protection;record->left=left;record->right=right;

@@ -1,3 +1,5 @@
+> 历史开发记录：以下参数、路径、旧出口条件和验证结论属于原版本；当前 0.28.0 以 [CHANGELOG](../CHANGELOG.md)、[环岛诊断](RING_DIAGNOSTICS.md)、[刹车说明](STRIPE_BRAKE.md) 为准。
+
 # 0.3.3-beta 验证记录
 
 日期：2026-10-21。源码分支：`10-21-medium`，发布标题：`passmedium`。

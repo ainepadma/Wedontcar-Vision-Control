@@ -21,13 +21,6 @@
 #define RING_EXIT_SETTLE_MS 200U
 #define RING_360_REARM_FRAMES 10U
 #define RING_360_REARM_MS 600U
-/* Real OUTER border angle, in native image pixels, measured from horizontal.
- * The reference LCD photo is about 70 deg on its stretched display, about
- * 60 deg in the 304x154 image. Mirror the left side as 180-angle. */
-#define RING_EXIT_BORDER_TARGET10 600
-#define RING_EXIT_BORDER_TOLERANCE10 80
-#define RING_EXIT_STRAIGHT_CONFIRM_FRAMES 3U
-#define RING_EXIT_STRAIGHT_MS 300U
 #define RING_ACTIVE_TIMEOUT_MS 20000U
 #define RING_VISION_STALE_MS 150U
 #define RING_STRAIGHT_SPEED_SCALE 1.0f
@@ -41,8 +34,7 @@ typedef enum {
 
 /* Actual control path, independent of the screen's frame/preview selection. */
 typedef enum {
-    RING_SOURCE_NORMAL=0, RING_SOURCE_GUIDE, RING_SOURCE_HOLD, RING_SOURCE_INVALID,
-    RING_SOURCE_STRAIGHT
+    RING_SOURCE_NORMAL=0, RING_SOURCE_GUIDE, RING_SOURCE_HOLD, RING_SOURCE_INVALID
 } ring_path_source_t;
 
 typedef struct {
@@ -54,9 +46,8 @@ typedef struct {
     uint8_t vote_frames,vote_kind,vote_side,clear_frames,transition_frames,exit_gap_seen;
     uint8_t have_frame,have_tick,fault_resume_phase;
     uint8_t bridge_seen,bridge_passed,exit_armed,bridge_clear_frames;
-    uint8_t exit_road_frames;
-    uint8_t exit_straight_active,exit_straight_done,exit_angle_frames;
-    uint32_t exit_straight_started_ms;
+    uint8_t exit_road_frames,separator_seen;
+    uint32_t separator_frame;
     uint32_t exit_road_started_ms;
     uint32_t corner_frame_number,corner_guide_frame_number,corner_last_guide_ms;
     uint32_t last_frame_ms,last_tick_ms,event_started_ms,phase_started_ms,event_id;
@@ -80,6 +71,5 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *state,
 float ring_control_line_x(const ring_control_state_t *state,float row_percent);
 uint8_t ring_control_guidance_active(const ring_control_state_t *state);
 uint8_t ring_control_path_source(const ring_control_state_t *state);
-uint8_t ring_control_straight_active(const ring_control_state_t *state,uint32_t now_ms);
 const char *ring_control_stage_name(uint8_t stage);
 #endif

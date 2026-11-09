@@ -88,7 +88,7 @@ void track_control_stop(track_control_state_t *state, uint8_t reason)
     state->running = 0U;
     state->bottom_active = state->bottom_votes = state->bottom_center_votes = 0U;
     state->bottom_armed = 1U;
-    state->stop_reason = reason >= TRACK_STOP_MANUAL && reason <= TRACK_STOP_RING
+    state->stop_reason = reason >= TRACK_STOP_MANUAL && reason <= TRACK_STOP_STRIPE
                              ? reason : TRACK_STOP_MANUAL;
     state->derivative = 0.0f;
     state->derivative_ready = 0U;
@@ -264,16 +264,6 @@ void track_control_set_loss_stop(track_control_state_t *state, uint8_t enabled)
         else if (!state->frame_valid)
             track_control_stop(state, TRACK_STOP_LOST);
     }
-}
-
-void track_control_force_straight(track_control_state_t *state,track_control_output_t *output)
-{
-    if(!state || !output || !state->running || !output->running) return;
-    state->servo_angle=state->config.servo_center;
-    output->servo_angle=state->servo_angle;
-    state->filtered_error=0.0f;state->filtered_heading=0.0f;state->filtered_near_heading=0.0f;
-    state->near_geometry_valid=0U;state->derivative=0.0f;state->derivative_ready=0U;
-    state->bottom_active=0U;state->bottom_votes=0U;state->bottom_center_votes=0U;
 }
 
 track_control_output_t track_control_tick(track_control_state_t *state,

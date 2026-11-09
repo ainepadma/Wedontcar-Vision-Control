@@ -13,20 +13,14 @@
 #define RING_CORNER_MIN_QUALITY 55U
 #define RING_CORNER_REACQUIRE_FRAMES 2U
 
-/* Exit white band: every pixel in each row must be white, for this many
- * consecutive rows (percentage of current image height, rounded up). */
-#ifndef RING_EXIT_WHITE_BAND_PERCENT
+/* Diagnostic only; full-white rows do not trigger an exit. */
 #define RING_EXIT_WHITE_BAND_PERCENT 5
-#endif
-/* Angle measured FROM the vertical forward direction in native image pixels.
- * 60 degrees => horizontal travel / upward travel = tan(60) ~= 1.732.
- * Must be finite and strictly between 0 and 90; invalid values disable repair. */
-#ifndef RING_EXIT_LINE_ANGLE_DEG
-#define RING_EXIT_LINE_ANGLE_DEG 60.0f
-#endif
-#if RING_EXIT_WHITE_BAND_PERCENT < 1 || RING_EXIT_WHITE_BAND_PERCENT > 100
-#error "RING_EXIT_WHITE_BAND_PERCENT must be between 1 and 100"
-#endif
+
+/* Third repair ONLY (S5/S6). Extra left lean in normalized dx/dy.
+ * 0 restores the measured slope; start at 0.05, increase in steps of 0.01.
+ * The current black corner stays fixed while the upper end rotates left.
+ * Mirrored right rings rotate inward. Runtime/debugger tunable, clamped 0..0.5. */
+extern volatile float ring_third_left_lean;
 
 /* 360 entry tuning, in percent of the CURRENT image height.
  * P must remain above A. Bounds are inclusive; 100 imposes no extra upper cut.
@@ -73,6 +67,7 @@ typedef struct {
     int16_t error,heading; /* Same units/sign as ordinary track_path_observation_t. */
     uint8_t valid,confidence;
     uint8_t clip_upper;
+    uint8_t third_repair; /* S5/S6: center follows only the virtual outer border. */
     uint16_t active_top,active_end;
     ring_corner_line_t boundary[2]; /* LEFT/RIGHT virtual segments, not centers. */
     uint8_t corner_side,corner_kind;
@@ -94,6 +89,9 @@ typedef struct {
     uint8_t quality[2],continuous[2],gap[2],bottom_open[2],paired;
     uint8_t entry[2],cross_entry;
     ring_corner_point_t a[2],p[2],v[2],breakpoint[2];
+    uint8_t bridge_ready[2],exit_separator;
+    ring_corner_point_t exit_v[2]; /* Direction-checked late exit; entry V unchanged. */
+    ring_corner_point_t bridge_tip[2]; /* Late-ring mouth lips, separate from entry. */
     ring_corner_point_t mouth_upper[2],mouth_lower[2];
     uint8_t paired_mouth,v_reacquired;
     uint8_t exit_white_band;
@@ -115,6 +113,9 @@ typedef struct {
     uint8_t v_valid[2],v_misses[2];
     uint16_t rows,cols;
     uint8_t valid[2],misses[2];
+    ring_corner_point_t third_tip[2];
+    float third_slope[2];
+    uint8_t third_valid[2],third_misses[2];
 } ring_corner_tracker_t;
 
 /* Pure bounded per-frame geometry; must never alter binary or carry motion state.
