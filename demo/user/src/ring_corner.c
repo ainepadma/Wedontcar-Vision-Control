@@ -11,6 +11,7 @@ static uint16_t edge[2][LIMIT][2],length[2];
 static uint16_t b[2][480];
 static uint8_t flags[480];
 volatile float ring_third_left_lean=0.26f;
+volatile float ring_third_left_center_shift=0.55f;
 static const int8_t step[2][8][2]={
  {{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1},{1,0},{1,1}},
  {{0,1},{1,1},{1,0},{1,-1},{0,-1},{-1,-1},{-1,0},{-1,1}}};
@@ -356,7 +357,10 @@ static void inner_v_guide(ring_corner_guide_t *g,unsigned inner,unsigned h,
  * inward only through white pixels in the same run as that offset. */
 static unsigned third_left_center(const uint8_t *row,unsigned x,unsigned w,float progress)
 {
-    unsigned shift=(unsigned)(w*.12f*progress*progress+.5f);
+    float amount=ring_third_left_center_shift;
+    if(!isfinite(amount)) amount=.45f;
+    float bend=progress*progress*(3.f-2.f*progress);
+    unsigned shift=(unsigned)(w*clamp(amount,0.f,.65f)*bend+.5f);
     unsigned limit=x>shift ? x-shift : 0U, start=x;
     while(x>limit && row[x-1U]) --x;
     if(x>limit || x==0U) {

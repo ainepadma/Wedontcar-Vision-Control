@@ -39,7 +39,7 @@ static void check_center(unsigned inner)
         assert(y>=g->active_top && image[y*304+x]);
         if(inner || y>=near_start) assert(fabsf(x-baseline)<1.01f);
         else {
-            assert(x<=baseline && baseline-x<=38.f);
+            assert(x<=baseline && baseline-x<=304.f*ring_third_left_center_shift+1.f);
             for(unsigned xx=x;xx<=(unsigned)baseline;++xx) assert(image[y*304+xx]);
         }
         if(i && !inner && (g->center_link_valid&(1U<<i))) {
@@ -65,7 +65,16 @@ static void prefer_near_tip(unsigned inner)
         for(int x=left;x<right;++x) image[y*304+(inner ? 303-x : x)]=255;
     }
     ring_third_left_lean=.30f;
+    ring_third_left_center_shift=0.f;
     ring_corner_process(image,154,304,0,&frame);
+    ring_corner_guide_t parallel=*guide(inner);
+    ring_third_left_center_shift=.45f;
+    ring_corner_process(image,154,304,0,&frame);
+    assert(parallel.valid && guide(inner)->valid);
+    assert(!memcmp(parallel.boundary,guide(inner)->boundary,sizeof(parallel.boundary)));
+    assert(parallel.center_valid==guide(inner)->center_valid);
+    assert(inner ? parallel.heading==guide(inner)->heading : guide(inner)->heading<parallel.heading);
+    if(inner) assert(!memcmp(parallel.center,guide(inner)->center,sizeof(parallel.center)));
     check_center(inner);
     assert(guide(inner)->corner_y>=93.f && guide(inner)->corner_y<=96.f);
     assert(fabsf(guide(inner)->corner_x-(inner ? 41.f : 262.f))<=2.f);

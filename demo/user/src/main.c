@@ -185,7 +185,7 @@ static void steering_log_service(void)
                     log_export_hash=2166136261U;
                     log_export_state=1U;
                     log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),
-                        "\r\n#LOG BEGIN %lu %lu %lu FW=0.32.0\r\n%s",
+                        "\r\n#LOG BEGIN %lu %lu %lu FW=0.33.0\r\n%s",
                         (unsigned long)info.session,(unsigned long)info.count,
                         (unsigned long)info.overwritten,steering_log_csv_header()));
                 }
@@ -292,7 +292,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.32.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
+        "#CAM FW=0.33.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -393,7 +393,7 @@ static void assistant_send_speed(uint32_t now)
     int32_t left_total = encoder_total_l, right_total = encoder_total_r;
     interrupt_global_enable(primask);
     int length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#SPD FW=0.32.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
+        "#SPD FW=0.33.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
         (unsigned long)now, (unsigned int)running, (unsigned int)protection,
         (unsigned int)full, (unsigned int)stop, (unsigned int)fault,
         (int)(target * 10.0f), (int)left, (int)right,

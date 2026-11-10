@@ -1,3 +1,5 @@
+> 文档定位更新于 2026-11-10。本文保留原版本参数、测试与交付记录；当前 0.33.0 / `1110-deng` 见 [README](../README.md)、[环岛诊断](RING_DIAGNOSTICS.md) 和 [当前验证](RELEASE_CHECKS_0.33.md)。本文中的“当前 / 本轮 / 优先”均限定为原记录时点。
+
 > 历史开发记录：以下参数、路径、旧出口条件和验证结论属于原版本；当前 0.28.0 以 [CHANGELOG](../CHANGELOG.md)、[环岛诊断](RING_DIAGNOSTICS.md)、[刹车说明](STRIPE_BRAKE.md) 为准。
 
 # 本次环岛视觉替换说明
