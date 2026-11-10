@@ -27,6 +27,7 @@ static void clipped(void){
  assert(g->boundary[1].valid && !g->boundary[0].valid);
 }
 int main(int argc,char **argv){assert(argc==2);directory=argv[1];
+ ring_third_left_lean=.06f; /* Calibration used to capture these historical fixtures. */
  const char *ordinary[]={"ordinary_p1","ordinary_p2","ordinary_p9","ordinary_p10","ordinary_p1_alternate","ordinary_p2_alternate","ordinary_p9_alternate","ordinary_p10_alternate"};
  for(unsigned n=0;n<8;++n){reset();load(ordinary[n]);process(10);
   assert(result.valid && state.selected_path.valid && result.valid_rows>60);
@@ -44,16 +45,18 @@ int main(int argc,char **argv){assert(argc==2);directory=argv[1];
  assert(state.corner_selected_guide.boundary[1].y1==result.ring.corners.a[1].y);
  load("timing_p1");process(20);assert(state.corner_stage==5 && state.corner_guide_id==17 && !state.separator_seen);
  load("timing_p2");process(1);assert(state.corner_stage==6 && state.corner_guide_id==19 && state.separator_seen);
- load("timing_p3");process(30);assert(state.corner_stage==6 && state.corner_guide_id!=21);
+ load("timing_p3");process(1);assert(state.corner_stage==6 && !state.corner_guide_id);
+ assert(ring_control_path_source(&state)==RING_SOURCE_NORMAL);
+ process(29);assert(state.corner_stage==6 && !state.corner_guide_id);
  load("latest_p3");process(3);assert(state.corner_stage==7 && state.corner_guide_id==21);
  assert(state.corner_selected_guide.boundary[0].valid && !state.corner_selected_guide.boundary[1].valid);
  load("latest_p4");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
  load("latest_p5");process(30);assert(state.corner_stage==7 && state.corner_guide_id==21);
  memset(image,0,sizeof(image));for(unsigned y=0;y<154;++y) memset(image+y*304+90,255,124);
- process(1);assert(ring_control_path_source(&state)==RING_SOURCE_HOLD && !state.exit_road_frames);
- process(2);assert(state.completed_360==0 && state.corner_stage==7 && state.exit_road_frames==2);
+ process(2);assert(ring_control_path_source(&state)==RING_SOURCE_HOLD && state.tip_missing_frames==2);
+ process(1);assert(state.completed_360==1 && state.phase==RING_STATE_COOLDOWN);
  assert(state.selected_path.valid && state.path_mode==TRACK_PATH_NORMAL && !state.corner_guide_id);
  process(9);assert(state.completed_360==1 && state.phase==RING_STATE_COOLDOWN);
- puts("PASS third mouth stays repaired; one-frame separator then directional inner V connects left boundary without timed steering; then aligned road settles 200ms");
+ puts("PASS third repair, ordinary handoff, fourth repair and ordinary tracking on exit");
  reset();step("cross",1);assert(state.kind==TRACK_RING_270 && state.corner_guide_id==2);
  puts("PASS 270 bilateral recognition unchanged; initial entry geometry unchanged");return 0;}

@@ -10,16 +10,12 @@
 #define RING_GUIDE_NEAR_PERCENT VISION_SEARCH_END_PERCENT
 #define RING_CONFIRM_FRAMES 3U
 #define RING_CLEAR_FRAMES 3U
-/* 360 exit handoff / re-arm. Normalized image errors, not physical angles.
- * Require current aligned road repeatedly; elapsed time alone never unlocks. */
+/* 360 re-arm. Require aligned road before recognizing another ring. */
 #define RING_EXIT_ROAD_MIN_CONFIDENCE 65U
 #define RING_EXIT_ROAD_MAX_ERROR 180
 #define RING_EXIT_ROAD_MAX_HEADING 120
 #define RING_EXIT_NEAR_SIGN_DEADBAND 40
 #define RING_EXIT_BOTTOM_MAX_ERROR 80
-#define RING_EXIT_LANE_CONFIRM_FRAMES 2U
-#define RING_EXIT_SETTLE_FRAMES 8U
-#define RING_EXIT_SETTLE_MS 200U
 /* Same local search window used to reacquire contour vertices. */
 #define RING_EXIT_TIP_X_FRACTION .08f
 #define RING_EXIT_TIP_Y_FRACTION .12f
@@ -50,13 +46,11 @@ typedef struct {
     uint8_t vote_frames,vote_kind,vote_side,clear_frames,transition_frames,exit_gap_seen;
     uint8_t have_frame,have_tick,fault_resume_phase;
     uint8_t bridge_seen,bridge_passed,exit_armed,bridge_clear_frames;
-    uint8_t exit_road_frames,exit_lane_frames,separator_seen;
+    uint8_t tip_missing_frames,second_outer_seen,third_seen,third_passed,separator_seen;
     uint8_t exit_candidate_frames,exit_tip_valid;
     float exit_candidate_x,exit_candidate_y,exit_tip_x,exit_tip_y;
     uint32_t exit_tip_frame,exit_tip_ms;
     uint32_t separator_frame;
-    uint32_t exit_road_started_ms;
-    uint8_t exit_road_pending; /* Fresh S7 observation awaiting path selection. */
     uint32_t corner_frame_number,corner_guide_frame_number,corner_last_guide_ms;
     uint32_t last_frame_ms,last_tick_ms,event_started_ms,phase_started_ms,event_id;
     float yaw_progress_deg,travel_counts;

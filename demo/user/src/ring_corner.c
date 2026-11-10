@@ -10,7 +10,7 @@
 static uint16_t edge[2][LIMIT][2],length[2];
 static uint16_t b[2][480];
 static uint8_t flags[480];
-volatile float ring_third_left_lean=0.06f;
+volatile float ring_third_left_lean=0.30f;
 static const int8_t step[2][8][2]={
  {{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1},{1,0},{1,1}},
  {{0,1},{1,1},{1,0},{1,-1},{0,-1},{-1,-1},{-1,0},{-1,1}}};
@@ -311,13 +311,12 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
  * gives a parallel center; neither the discarded outer branch nor the old
  * ordinary center can pull it sideways below the short visible segment. */
 static void third_finish(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
-                         ring_corner_guide_t *g)
+                         ring_corner_guide_t *g,unsigned top)
 {
     const ring_corner_line_t *line=&g->boundary[1U-inner];
     g->valid=0;g->confidence=0;g->center_valid=0;g->center_link_valid=0;
     memset(g->center,0,sizeof(g->center));
     if(!line->valid) return;
-    unsigned top=(unsigned)ceilf(fminf(line->y0,line->y1));
     if(top+6U>=h) return;
     g->third_repair=1;g->clip_upper=1;g->active_top=(uint16_t)top;g->active_end=(uint16_t)h;
     /* A fixed native-image offset is independent of every discarded branch.
@@ -354,16 +353,33 @@ static void third_finish(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
     g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
 }
 static void third_rotate(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
-                         float slope,ring_corner_guide_t *g)
+                         float slope,unsigned support_top,ring_corner_guide_t *g)
 {
     ring_corner_line_t *line=&g->boundary[1U-inner];
     float lean=ring_third_left_lean;
     if(!isfinite(lean)) lean=0.05f;
     slope+=(inner ? -1.f : 1.f)*clamp(lean,0.f,.5f)*(float)w/h;
-    /* Rotate around this frame's real tip, never around the roof probe. */
-    line->x1=g->corner_x;line->y1=g->corner_y;
-    line->x0=line->x1+slope*(line->y0-line->y1);
-    third_finish(im,h,w,inner,g);
+    /* Follow the rotated ray from the current tip to the first supported
+     * black roof. The fixed-column probe estimates direction only. */
+    int top=(int)g->corner_y;
+    unsigned white=0,black=0;
+    for(int y=top-3;y>=0;--y) {
+        float x=g->corner_x+slope*((float)y-g->corner_y);
+        if(x<0.f || x>w-1.f) break;
+        if(im[(unsigned)y*w+(unsigned)(x+.5f)]) {
+            ++white;black=0;top=y;
+        } else if(white>=4U && ++black>=3U) {
+            top=y+2;
+            break;
+        }
+    }
+    line->valid=0;
+    segment(g,1U-inner,g->corner_x+slope*((float)top-g->corner_y),
+            (float)top,g->corner_x,g->corner_y);
+    third_finish(im,h,w,inner,g,(unsigned)top);
+    /* The full blue border can reach beyond the useful parallel center. */
+    if(!g->valid && support_top>(unsigned)top)
+        third_finish(im,h,w,inner,g,support_top);
 }
 /* Recover the SAME mouth tip from current row pixels after a detector switch.
  * A real inward extremum with two supported arms is required; no old x/y is
@@ -488,6 +504,25 @@ static void late_exit_features(const uint8_t *im,unsigned h,unsigned w,ring_corn
                (!valid(side,yy) || fabsf(b[side][yy]-x)>w*.045f)) continue;
             if(!f->exit_v[side].quality || y>f->exit_v[side].y)
                 f->exit_v[side]=point(x,y,RING_CORNER_B);
+        }
+    }
+    /* A slanted inner lip can turn outwards without a downward V extremum.
+     * Require a supported near-vertical arm above the abrupt outward turn. */
+    unsigned span=h/18U;
+    if(span<4U) span=4U;
+    for(unsigned side=0;side<2U;++side) {
+        if(f->exit_v[side].quality) continue;
+        float best=0.f;
+        for(unsigned y=span+h/10U;y<h*2U/3U;++y) {
+            if(!valid(side,y-span) || !valid(side,y) || !valid(side,y+span)) continue;
+            float x=profile(side,(int)y,w);
+            float above=profile(side,(int)(y-span),w),below=profile(side,(int)(y+span),w);
+            if(x<w*.08f || x>w*.33f || fabsf(above-x)>w*.03f || x-below<w*.08f) continue;
+            float turn=x-below-fabsf(above-x);
+            if(turn>best) {
+                best=turn;
+                f->exit_v[side]=point(b[side][y],y,RING_CORNER_B);
+            }
         }
     }
 }
@@ -670,7 +705,8 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
                 segment(g,other,x,roof,bp.x,bp.y);
                 g->corner_side=(uint8_t)other;g->corner_kind=RING_CORNER_A;
                 g->corner_x=bp.x;g->corner_y=bp.y;
-                third_rotate(im,h,w,side,(bp.x-x)/(bp.y-roof),g);
+                g->third_repair=1;
+                third_rotate(im,h,w,side,(bp.x-x)/(bp.y-roof),(unsigned)roof,g);
             }
         }
         if(stage==7) {exit_connection(im,h,w,side,f,g);continue;}
@@ -718,24 +754,28 @@ void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ri
            fabsf(g->corner_x-s->third_tip[inner].x)>f->cols*.06f ||
            fabsf(g->corner_y-s->third_tip[inner].y)>f->rows*.08f)) {
             if(third_reacquire(f->rows,f->cols,1U-inner,f,&s->third_tip[inner],&tip)) {
-                if(!accepted) {
-                    memset(g,0,sizeof(*g));g->third_repair=1;
-                    float top=fmaxf(2.f,tip.y-f->rows*.20f);
-                    segment(g,1U-inner,tip.x+s->third_slope[inner]*(top-tip.y),
-                            top,tip.x,tip.y);
-                    line=&g->boundary[1U-inner];
-                }
+                if(!accepted) memset(g,0,sizeof(*g));
+                g->third_repair=1;
                 g->corner_side=(uint8_t)(1U-inner);g->corner_kind=RING_CORNER_A;
                 g->corner_x=tip.x;g->corner_y=tip.y;accepted=1;
+            } else if(accepted && g->corner_y>s->third_tip[inner].y &&
+                      g->corner_y-s->third_tip[inner].y<=f->rows*.30f &&
+                      fabsf(g->corner_x-s->third_tip[inner].x)<=f->cols*.12f) {
+                /* A current tip can move toward the bottom between frames.
+                 * Re-estimate the direction after a larger forward jump. */
+                s->third_valid[inner]=0;
             } else accepted=0;
         }
         if(accepted) {
             float lean=ring_third_left_lean;if(!isfinite(lean)) lean=.05f;
-            float slope=(line->x1-line->x0)/(line->y1-line->y0)-
-                (inner ? -1.f : 1.f)*clamp(lean,0.f,.5f)*(float)f->cols/f->rows;
-            if(tip.quality) slope=s->third_slope[inner];
-            else if(s->third_valid[inner]) slope=s->third_slope[inner]*.8f+slope*.2f;
-            third_rotate(im,f->rows,f->cols,inner,slope,g);
+            float slope=s->third_slope[inner];
+            if(!tip.quality) {
+                float measured=(line->x1-line->x0)/(line->y1-line->y0)-
+                    (inner ? -1.f : 1.f)*clamp(lean,0.f,.5f)*(float)f->cols/f->rows;
+                slope=s->third_valid[inner] ? slope*.8f+measured*.2f : measured;
+            }
+            unsigned support_top=tip.quality ? (unsigned)fmaxf(2.f,tip.y-f->rows*.20f) : g->active_top;
+            third_rotate(im,f->rows,f->cols,inner,slope,support_top,g);
             s->third_slope[inner]=slope;
             s->third_tip[inner]=point(g->corner_x,g->corner_y,RING_CORNER_A);
             s->third_valid[inner]=1;s->third_misses[inner]=0;
