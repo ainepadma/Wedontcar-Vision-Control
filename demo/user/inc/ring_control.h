@@ -10,6 +10,10 @@
 #define RING_GUIDE_NEAR_PERCENT VISION_SEARCH_END_PERCENT
 #define RING_CONFIRM_FRAMES 3U
 #define RING_CLEAR_FRAMES 3U
+/* S1 -> S3 only. y is measured down from the top of the camera image.
+ * Pull frames are clamped to 1..RING_CONFIRM_FRAMES. */
+extern volatile uint8_t ring_entry_v_min_y_percent;
+extern volatile uint8_t ring_entry_v_pull_frames;
 /* 360 re-arm. Require aligned road before recognizing another ring. */
 #define RING_EXIT_ROAD_MIN_CONFIDENCE 65U
 #define RING_EXIT_ROAD_MAX_ERROR 180
@@ -47,7 +51,8 @@ typedef struct {
     uint8_t have_frame,have_tick,fault_resume_phase;
     uint8_t bridge_seen,bridge_passed,exit_armed,bridge_clear_frames;
     uint8_t tip_missing_frames,second_outer_seen,third_seen,third_passed,separator_seen;
-    uint8_t exit_candidate_frames,exit_tip_valid;
+    uint8_t entry_v_frames,exit_candidate_frames,exit_tip_valid;
+    float entry_v_x,entry_v_y;
     float exit_candidate_x,exit_candidate_y,exit_tip_x,exit_tip_y;
     uint32_t exit_tip_frame,exit_tip_ms;
     uint32_t separator_frame;
