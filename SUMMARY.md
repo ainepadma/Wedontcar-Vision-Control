@@ -35,4 +35,4 @@
 
 ## 接手顺序
 
-先读 [README](README.md)、[当前环岛诊断](docs/RING_DIAGNOSTICS.md) 和 [本版验证](docs/RELEASE_CHECKS_0.33.md)，再按 [待测试](待测试.md) 记录实车。历史参数与验证按 CHANGELOG 所属版本解释。
+先读 [README](README.md)、[当前环岛诊断](README.md#环岛诊断) 和 [本版验证](CHANGELOG.md#发布验收明细)，再按 [待测试](待测试.md) 记录实车。历史参数与验证按 CHANGELOG 所属版本解释。
