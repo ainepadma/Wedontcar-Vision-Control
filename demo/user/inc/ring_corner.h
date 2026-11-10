@@ -22,6 +22,12 @@
  * Mirrored right rings rotate inward. Runtime/debugger tunable, clamped 0..0.5. */
 extern volatile float ring_third_left_lean;
 
+/* Left S5/S6 green center ONLY. Maximum inward shift as image-width fraction.
+ * Default 0.45; increase by 0.05 for an earlier, stronger left turn.
+ * 0 restores the parallel center. Runtime/debugger tunable, clamped 0..0.65.
+ * The near third stays fixed; the far center stops inside its own white run. */
+extern volatile float ring_third_left_center_shift;
+
 /* 360 entry tuning, in percent of the CURRENT image height.
  * P must remain above A. Bounds are inclusive; 100 imposes no extra upper cut.
  * Temporarily allow image-edge contact; size/height checks remain active.
@@ -89,9 +95,9 @@ typedef struct {
     uint8_t quality[2],continuous[2],gap[2],bottom_open[2],paired;
     uint8_t entry[2],cross_entry;
     ring_corner_point_t a[2],p[2],v[2],breakpoint[2];
-    uint8_t bridge_ready[2],exit_separator;
+    ring_corner_point_t entry_v[2]; /* Upper shoulder for S1 -> S3 only. */
+    uint8_t exit_separator;
     ring_corner_point_t exit_v[2]; /* Direction-checked late exit; entry V unchanged. */
-    ring_corner_point_t bridge_tip[2]; /* Late-ring mouth lips, separate from entry. */
     ring_corner_point_t mouth_upper[2],mouth_lower[2];
     uint8_t paired_mouth,v_reacquired;
     uint8_t exit_white_band;

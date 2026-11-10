@@ -607,6 +607,88 @@ void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols)
 }
 
 
+/* A virtual border repairs the near road. Above it, keep following the
+ * CURRENT ordinary white-road center instead of clipping at the vertex.
+ * The existing guide samples and blue border are never moved. */
+static void track_continue_ring_road(const uint8_t *binary, uint16_t rows,
+                                     uint16_t cols, const track_vision_result_t *road,
+                                     ring_corner_guide_t *guide)
+{
+    static uint16_t center[TRACK_VISION_MAX_ROWS];
+    static uint8_t valid[TRACK_VISION_MAX_ROWS];
+    if(!guide->valid || !guide->clip_upper || rows<2U) return;
+    memset(valid,0,rows);
+    unsigned first=RING_CORNER_CENTER_SAMPLES;
+    for(unsigned i=0;i<RING_CORNER_CENTER_SAMPLES;++i) {
+        if(!(guide->center_valid&(1U<<i))) continue;
+        if(first==RING_CORNER_CENTER_SAMPLES) first=i;
+        unsigned y=i*(rows-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
+        center[y]=guide->center[i];valid[y]=1;
+        if(!i || !(guide->center_link_valid&(1U<<i))) continue;
+        unsigned y0=(i-1U)*(rows-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
+        for(unsigned row=y0+1U;row<y;++row) {
+            center[row]=(uint16_t)((guide->center[i-1U]*(y-row)+guide->center[i]*(row-y0))/(y-y0));
+            valid[row]=(uint8_t)(binary[row*cols+center[row]]!=0);
+        }
+    }
+    if(first==RING_CORNER_CENTER_SAMPLES || !first) return;
+    unsigned seed=first*(rows-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
+    unsigned previous=seed,previous_x=center[seed],top=seed,added=0;
+    for(unsigned next=seed;next>0U;--next) {
+        unsigned y=next-1U,gap=previous-y;
+        if(gap>3U) break;
+        if(!road->row_valid[y]) continue;
+        unsigned x=road->center[y];
+        if(x>=cols || !binary[y*cols+x]) continue;
+        /* Left repair already owns the turn. A connected upper straight or
+         * right fork must not replace its far end through a broad white cap. */
+        if(y<guide->active_top && x>center[seed]+cols/20U) continue;
+        /* Use the ordinary tracker's local continuity allowance. A far
+         * candidate on the other side of a black island cannot take over. */
+        unsigned allowance=cols*8U/100U+gap*cols*35U/1000U;
+        if(track_distance((uint16_t)x,(uint16_t)previous_x)>allowance ||
+           !track_white_connection(binary,cols,(int)previous_x,(int)previous,(int)x,(int)y)) continue;
+        /* The pixel connection has already been checked. Fill a short
+         * ordinary detector miss on that same white segment so display and
+         * control do not retain an artificial break between its endpoints. */
+        for(unsigned row=y+1U;row<previous;++row) {
+            unsigned col=(x*(previous-row)+previous_x*(row-y))/gap;
+            if(binary[row*cols+col]) {center[row]=(uint16_t)col;valid[row]=1;}
+        }
+        center[y]=(uint16_t)x;valid[y]=1;
+        previous=y;previous_x=x;top=y;++added;
+    }
+    if(added<3U) return;
+    ring_corner_guide_t completed=*guide;
+    for(unsigned i=0;i<first;++i) {
+        unsigned y=i*(rows-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
+        if(valid[y]) {completed.center[i]=center[y];completed.center_valid|=(uint16_t)(1U<<i);}
+    }
+    if(completed.center_valid==guide->center_valid) return;
+    for(unsigned i=1U;i<=first;++i) {
+        if(!(completed.center_valid&(1U<<i)) || !(completed.center_valid&(1U<<(i-1U)))) continue;
+        unsigned y0=(i-1U)*(rows-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
+        unsigned y=i*(rows-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
+        int linked=track_white_connection(binary,cols,completed.center[i-1U],(int)y0,completed.center[i],(int)y);
+        for(unsigned row=y0;row<=y && linked;++row) if(!valid[row]) linked=0;
+        if(linked) completed.center_link_valid|=(uint16_t)(1U<<i);
+    }
+    unsigned span=rows-top,zone=span/3U,n=0,nc=0,fc=0;
+    uint32_t sum=0,weights=0,ns=0,fs=0;
+    for(unsigned y=top;y<rows;++y) if(valid[y]) {
+        unsigned weight=y>=rows-zone ? 3U : (y>=top+zone ? 2U : 1U);
+        sum+=center[y]*weight;weights+=weight;++n;
+        if(y>=rows-zone) {ns+=center[y];++nc;}
+        if(y<top+zone) {fs+=center[y];++fc;}
+    }
+    if(n*100U<span*50U || nc<span/8U || fc<3U || !weights) return;
+    completed.active_top=(uint16_t)top;
+    completed.confidence=(uint8_t)(n*100U/span);
+    completed.error=track_clamp_error(((int64_t)2*sum-(int64_t)(cols-1U)*weights)*1000/((int64_t)(cols-1U)*weights));
+    completed.heading=track_clamp_error(((int64_t)fs*nc-(int64_t)ns*fc)*2000/((int64_t)nc*fc*(cols-1U)));
+    *guide=completed;
+}
+
 /* Ring vision uses native eight-neighbour boundaries. Ordinary output is immutable. */
 void track_ring_vision_init(track_ring_vision_state_t *s)
 {
@@ -633,6 +715,11 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     ring_corner_process(binary,rows,cols,0,&out->ring.corners);
     ring_corner_frame_t *v=&out->ring.corners;
     ring_corner_stabilize(binary,0,&s->corner_tracker,v);
+    /* The second and third LEFT repairs share the same ordinary continuation.
+     * Ordinary outputs remain available unchanged for an eventual handoff. */
+    if(rows>=20U && rows<=TRACK_VISION_MAX_ROWS && cols>=32U && cols<=TRACK_VISION_MAX_COLS)
+        for(unsigned stage=3U;stage<=6U;++stage)
+            track_continue_ring_road(binary,rows,cols,out,&v->guide[ring_pdf_guide(stage,0U)]);
     v->frame_number=out->frame_number;
     for(unsigned y=0;y<rows && y<TRACK_VISION_MAX_ROWS;++y) {
         out->raw_left[y]=v->border[0][y];out->raw_right[y]=v->border[1][y];
