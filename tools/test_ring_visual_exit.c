@@ -42,7 +42,7 @@ int main(void){for(unsigned in=0;in<2;++in){
      step();
      if(i<2) assert(s.corner_stage==6 && s.corner_guide_id!=ring_pdf_guide(7,in));
  }
- assert(s.corner_stage==7 && s.selected_path.error==150 && !s.exit_road_frames);
+ assert(s.corner_stage==7 && s.selected_path.error==150 && !s.tip_missing_frames);
  assert(ring_control_path_source(&s)==RING_SOURCE_GUIDE);
  o.corners.road_clear=0;
  guide(5,in,-800);guide(6,in,-800);step();assert(s.corner_stage==7&&s.selected_path.error==150);
@@ -54,12 +54,16 @@ int main(void){for(unsigned in=0;in<2;++in){
  o.corners.exit_v[in].x=in ? 237.f : 66.f;
  guide(7,in,165);step();
  assert(ring_control_path_source(&s)==RING_SOURCE_GUIDE && s.selected_path.error==165);
- memset(&o.corners.guide[ring_pdf_guide(7,in)],0,sizeof(ring_corner_guide_t));step();assert(s.corner_guide_held);
- for(unsigned i=0;i<7;++i){step();}assert(!s.selected_path.valid);
- /* After expiry a new vertex needs fresh confirmation, even in S7. */
+ memset(&o.corners.guide[ring_pdf_guide(7,in)],0,sizeof(ring_corner_guide_t));
+ o.corners.exit_v[in].quality=0;step();assert(s.corner_guide_held);
+ step();assert(s.corner_guide_held);
+ step();assert(s.completed_360==1 && s.phase==RING_STATE_COOLDOWN);
+ assert(ring_control_path_source(&s)==RING_SOURCE_NORMAL && s.selected_path.error==100);
+ /* A competing vertex cannot re-enter after the exit has finished. */
+ o.corners.exit_v[in].quality=90;
  o.corners.exit_v[in].x=in ? 178.f : 125.f;guide(7,in,-400);
- step();assert(!s.selected_path.valid);
- step();assert(!s.selected_path.valid);
- step();assert(ring_control_path_source(&s)==RING_SOURCE_GUIDE && s.selected_path.error==-400);
+ for(unsigned i=0;i<3;++i) {
+     step();assert(!s.action_locked && !s.corner_guide_id && s.selected_path.error==100);
+ }
  ring_control_init(&s);assert(!s.separator_seen&&!s.separator_frame);
  }puts("PASS mirrored separator order, same-tip confirmation, fourth-line hold and reacquisition");return 0;}
