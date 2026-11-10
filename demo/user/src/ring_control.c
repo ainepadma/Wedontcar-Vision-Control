@@ -2,8 +2,6 @@
 #include <math.h>
 #include <string.h>
 
-volatile uint8_t ring_entry_v_min_y_percent=20U;
-volatile uint8_t ring_entry_v_pull_frames=1U;
 static track_path_observation_t invalid(void) {track_path_observation_t p={0,0,0,0};return p;}
 void ring_control_init(ring_control_state_t *s)
 {if(s) {memset(s,0,sizeof(*s));s->protection_enabled=1;}}
@@ -70,28 +68,37 @@ static int same_tip(const ring_corner_frame_t *f,const ring_corner_point_t *tip,
     return fabsf(tip->x-x)<=f->cols*RING_EXIT_TIP_X_FRACTION &&
            fabsf(tip->y-y)<=f->rows*RING_EXIT_TIP_Y_FRACTION;
 }
-static void observe_entry_v(ring_control_state_t *s,const ring_corner_frame_t *f,unsigned in)
+/* A tracer can run across the roof into the opposite half of the image.
+ * Use the detector's existing 45/55% ambiguity band for both directions. */
+static int tip_on_expected_side(const ring_corner_frame_t *f,unsigned side)
 {
-    const ring_corner_point_t *tip=&f->entry_v[in];
-    const ring_corner_guide_t *guide=&f->guide[ring_pdf_guide(3,in)];
-    unsigned min_y=ring_entry_v_min_y_percent;
-    if(min_y>100U) min_y=100U;
-    if(f->entry[in] || !f->rows || !tip->quality || tip->y*100.f<f->rows*min_y ||
-       !guide->valid || !guide->boundary[1U-in].valid) {
-        s->entry_v_frames=0;
-        return;
-    }
-    if(s->entry_v_frames && !same_tip(f,tip,s->entry_v_x,s->entry_v_y))
-        s->entry_v_frames=0;
-    s->entry_v_x=tip->x;s->entry_v_y=tip->y;
-    if(s->entry_v_frames<RING_CONFIRM_FRAMES) ++s->entry_v_frames;
+    float last_x=(float)f->cols-1.f;
+    float from_side=side ? last_x-f->v[side].x : f->v[side].x;
+    return from_side>=0.f && from_side<=last_x*.55f;
 }
-static int entry_tip_matches(const ring_control_state_t *s,const ring_corner_frame_t *f,unsigned inner)
+static int usable_outer_join(const ring_corner_frame_t *f,unsigned inner)
 {
-    if(!s->entry_v_frames) return f->v[inner].quality!=0;
-    const ring_corner_guide_t *g=&f->guide[ring_pdf_guide(3,inner)];
-    ring_corner_point_t tip={.x=g->corner_x,.y=g->corner_y};
-    return g->corner_kind==RING_CORNER_B && same_tip(f,&tip,s->entry_v_x,s->entry_v_y);
+    unsigned outer=1U-inner;
+    const ring_corner_guide_t *guide=&f->guide[ring_pdf_guide(4,inner)];
+    return !f->cross_entry && !f->entry[0] && !f->entry[1] &&
+           f->v[outer].quality && !(f->v_reacquired & (1U<<outer)) &&
+           f->v[outer].y>f->rows*.25f && tip_on_expected_side(f,outer) &&
+           guide->valid && guide->boundary[outer].valid;
+}
+static int confirmed_outer_join(ring_control_state_t *s,const ring_corner_frame_t *f,unsigned inner)
+{
+    int inner_still_visible=f->v[inner].quality && !(f->v_reacquired & (1U<<inner)) &&
+        tip_on_expected_side(f,inner) && f->guide[ring_pdf_guide(3,inner)].valid;
+    if(inner_still_visible || !usable_outer_join(f,inner)) {
+        s->transition_frames=0;
+        return 0;
+    }
+    const ring_corner_point_t *tip=&f->v[1U-inner];
+    if(s->transition_frames && !same_tip(f,tip,s->s3_outer_x,s->s3_outer_y))
+        s->transition_frames=0;
+    s->s3_outer_x=tip->x;
+    s->s3_outer_y=tip->y;
+    return ++s->transition_frames>=RING_S3_OUTER_CONFIRM_FRAMES;
 }
 static int tip_passed(ring_control_state_t *s,int visible)
 {
@@ -168,7 +175,6 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
     if(s->have_frame && f->frame_number==s->corner_frame_number) return;
     if(s->have_frame && (uint32_t)(now-s->last_frame_ms)>RING_VISION_STALE_MS) {
         s->tip_missing_frames=0;s->clear_frames=0;s->transition_frames=0;s->bridge_clear_frames=0;
-        if(s->corner_stage<=2) s->entry_v_frames=0;
         s->exit_candidate_frames=0;
     }
     s->have_frame=1;s->corner_frame_number=f->frame_number;s->last_frame_ms=now;
@@ -198,7 +204,6 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         s->exit_tip_valid=0;s->exit_candidate_frames=0;
         s->corner_have_guide=0;s->corner_guide_id=0;s->selected_path=invalid();
         s->tip_missing_frames=0;s->second_outer_seen=0;s->third_seen=0;s->third_passed=0;
-        s->entry_v_frames=0;
         s->entry_seen=1;s->event_started_ms=now;++s->event_id;stage(s,1,now);
         return;
     }
@@ -214,31 +219,17 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
         }
         return;
     }
-    /* The entrance line stays selected until the upper shoulder can
-     * start S3. The old 360 S2 line is not part of this handoff. */
+    /* PDF section 1, Figs 1.6--1.15. One switch dispatch per fresh frame:
+     * cannot cascade or skip stages, cannot relabel direction mid-ring. */
     switch(s->corner_stage) {
-    case 1:
-    case 2: {
-        observe_entry_v(s,f,in);
-        unsigned pull=ring_entry_v_pull_frames;
-        if(pull<1U) pull=1U;
-        if(pull>RING_CONFIRM_FRAMES) pull=RING_CONFIRM_FRAMES;
-        if(s->entry_v_frames>=pull) stage(s,3,now);
-        break;
-    }
-    case 3:
-    case 4: {
-        int outer_visible=f->v[out].quality && f->v[out].y>=f->rows*.25f;
-        int inner_visible=s->corner_stage==3 ? entry_tip_matches(s,f,in) : f->v[in].quality!=0;
-        if(tip_passed(s,outer_visible || (!s->second_outer_seen && inner_visible))) {
-            stage(s,5,now);s->entry_passed=1;
-        } else if(s->corner_stage==3 &&
-                  confirmed(s,(!inner_visible || (!f->entry_v[in].quality && (f->v_reacquired&(1U<<in)))) &&
-                              outer_visible && !(f->v_reacquired&(1U<<out)))) {
-            stage(s,4,now);
-        }
-        break;
-    }
+    case 1: if(confirmed(s,!f->a[in].quality && f->bottom_open[in] && f->p[in].quality && f->continuous[out])) stage(s,2,now);break;
+    case 2: if(confirmed(s,f->v[in].quality && !f->p[in].quality && f->continuous[out])) stage(s,3,now);break;
+    case 3: if(confirmed_outer_join(s,f,in)) stage(s,4,now);break;
+    case 4: if(confirmed(s,f->paired && ((!f->v[out].quality || f->v[out].y<f->rows*.25f) ||
+        (!f->v[in].quality && !f->a[in].quality && f->continuous[out] && f->bridge_tip[out].quality &&
+         f->guide[ring_pdf_guide(5,in)].valid && f->guide[ring_pdf_guide(5,in)].boundary[out].valid)))) {
+        stage(s,5,now);s->entry_passed=1;
+    }break;
     case 5:
     case 6: {
         unsigned out_guide=ring_pdf_guide(5,in);
@@ -291,26 +282,16 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
     unsigned id=s->kind==TRACK_RING_360 ? ring_pdf_guide(stage_now,side) :
         (s->corner_stage==2 ? RING_GUIDE_NONE :
          (f->guide[RING_GUIDE_270_CONNECT].valid ? RING_GUIDE_270_CONNECT : RING_GUIDE_270_EXTEND));
-    if(s->kind==TRACK_RING_360 && stage_now<=2) id=ring_pdf_guide(1,side);
-    if(s->kind==TRACK_RING_360 && stage_now==3 &&
-       (!f->guide[id].valid || s->second_outer_seen ||
-        (s->entry_v_frames && !entry_tip_matches(s,f,side)))) {
-        id=RING_GUIDE_NONE;
-        if(f->v[1U-side].quality && f->v[1U-side].y>=f->rows*.25f)
-            id=ring_pdf_guide(4,side);
-    }
+    if(s->kind==TRACK_RING_360 && stage_now==3 && !f->guide[id].valid &&
+       usable_outer_join(f,side))
+        id=ring_pdf_guide(4,side);
     const ring_corner_guide_t *g=&f->guide[id];
     if(s->kind==TRACK_RING_360) {
-        if(stage_now==4 && (!f->v[1U-side].quality || f->v[1U-side].y<f->rows*.25f)) id=RING_GUIDE_NONE;
         if((stage_now==5 || stage_now==6) && (s->third_passed || !g->boundary[1U-side].valid))
             id=RING_GUIDE_NONE;
         if(stage_now==7 && !exit_guide_matches(s,f,side)) id=RING_GUIDE_NONE;
     }
     if(id && g->valid) {
-        if(s->kind==TRACK_RING_360 && stage_now==3) {
-            if(id==ring_pdf_guide(4,side)) s->second_outer_seen=1;
-            else if(s->entry_v_frames) {s->entry_v_x=g->corner_x;s->entry_v_y=g->corner_y;}
-        }
         s->corner_selected_guide=*g;s->corner_guide_id=(uint8_t)id;s->corner_have_guide=1;
         s->corner_guide_frame_number=f->frame_number;s->corner_last_guide_ms=s->last_frame_ms;
         if(s->kind==TRACK_RING_360 && stage_now>=3 && !s->line_active)
@@ -322,7 +303,7 @@ track_path_observation_t ring_control_select_path(ring_control_state_t *s,const 
     /* Brief dropouts may retain a previously selected line of the same repair. */
     unsigned last=s->corner_guide_id;
     if(s->kind==TRACK_RING_360 && s->corner_have_guide && s->line_active &&
-       ((stage_now<=2 && last==ring_pdf_guide(1,side)) ||
+       ((stage_now<=2 && last==ring_pdf_guide(stage_now,side)) ||
         (stage_now>=3 && stage_now<=4 && (last==ring_pdf_guide(3,side) || last==ring_pdf_guide(4,side))) ||
         (stage_now>=5 && stage_now<=6 && !s->third_passed &&
          (last==ring_pdf_guide(5,side) || last==ring_pdf_guide(6,side))) ||

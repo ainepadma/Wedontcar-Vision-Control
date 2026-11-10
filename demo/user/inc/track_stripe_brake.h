@@ -26,7 +26,7 @@ void stripe_brake_init(stripe_brake_state_t *state);
 /* Nonzero is white. Does not write pixels or depend on ordinary track validity. */
 void stripe_brake_detect(const uint8_t *binary, uint16_t rows, uint16_t cols,
                          stripe_brake_observation_t *out);
-/* New reliable observations only. A miss/C13/C14 never clears either latch. */
+/* New reliable observations only. A miss or C13 never clears either latch; disabling C14 clears only an unlatched state. */
 uint8_t stripe_brake_observe(stripe_brake_state_t *state,
     const stripe_brake_observation_t *observation, uint32_t observed_ms,
     uint32_t now_ms);

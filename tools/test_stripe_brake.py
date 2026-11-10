@@ -7,7 +7,7 @@ dest=root/'demo/mdk/Objects/stripe-brake-tests'
 dest.mkdir(parents=True,exist_ok=True)
 s=(root/'demo/user/src/isr.c').read_text(encoding='utf-8')
 button=s[s.index('        if (button_pressed && !stripe_brake.stopped)'):s.index('        // 获取编码器读数')]
-observe=s[s.index('        /* Stripe brake is active'):s.index('        if (protection_enabled && ring_control.fault)')]
+observe=s[s.index('        /* C14 enables stripe arming'):s.index('        if (protection_enabled && ring_control.fault)')]
 stop=s[s.index('        /* This runs every control tick'):s.index('        if (ring_control_guidance_active')]
 apply=s[s.index('static void stripe_brake_apply'):s.index('static volatile uint32_t control_clock_ms')]
 drive=s[s.index('        if (stripe_brake.stopped)\n        {'):s.index('        else if (motor_enabled)')]
@@ -32,7 +32,7 @@ static stripe_brake_state_t stripe_brake;
 static track_control_state_t track_control;
 static struct { stripe_brake_observation_t stripe; uint32_t observed_ms; } track_mailbox;
 static uint32_t control_clock_ms;
-static uint8_t track_stripe_brake_status,button_pressed,motor_feedback_fault;
+static uint8_t track_stripe_brake_status,button_pressed,motor_feedback_fault,protection_enabled;
 static float stripe_brake_servo_angle,speed_pwm_l,speed_pwm_r,speed_pwm,speed_target;
 static int16_t encoder_data_1,encoder_data_2,track_servo_tenths;
 static unsigned duty[3],direction[2],resets,starts,ring_control;
@@ -62,6 +62,7 @@ static void initialize(void) {
     track_control_init(&track_control,NULL);
     track_control_set_loss_stop(&track_control,0U);
     stripe_brake_init(&stripe_brake);
+    protection_enabled=1U;
     memset(&record,0,sizeof(record));
     memset(duty,0,sizeof(duty));
     encoder_data_1=encoder_data_2=0;
@@ -69,6 +70,16 @@ static void initialize(void) {
 }
 int main(void) {
     initialize();
+    protection_enabled=0U;
+    track_mailbox.stripe.near=1U;
+    for(unsigned i=0U;i<5U;++i)tick(1U);
+    assert(!stripe_brake.armed && !stripe_brake.stopped && !stripe_brake.arm_votes);
+    protection_enabled=1U;
+    track_mailbox.stripe.near=0U;
+    tick(1U);tick(1U);assert(stripe_brake.arm_votes==2U);
+    protection_enabled=0U;tick(0U);
+    assert(!stripe_brake.arm_votes && !stripe_brake.armed);
+    protection_enabled=1U;
     tick(1U);for(unsigned i=0U;i<10U;++i)tick(0U);
     assert(!stripe_brake.armed && stripe_brake.arm_votes==1U);
     tick(1U);tick(1U);assert(track_stripe_brake_status==1U);
@@ -84,6 +95,7 @@ int main(void) {
     assert(duty[2]==(unsigned)(track_control.servo_angle*10.0f));
     assert(resets==2U);
     encoder_data_1=encoder_data_2=0;
+    protection_enabled=0U;tick(0U);assert(stripe_brake.stopped);
     button_pressed=1U;tick(0U);
     assert(!track_control.running && starts==0U && ring_control==0U);
     encoder_data_1=10;encoder_data_2=-10;tick(0U);

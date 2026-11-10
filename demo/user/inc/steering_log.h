@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #define STEERING_LOG_BYTES (1024U * 1024U)
-#define STEERING_LOG_CAPACITY (STEERING_LOG_BYTES / 56U)
+#define STEERING_LOG_CAPACITY (STEERING_LOG_BYTES / 72U)
 typedef struct {
     uint32_t ms, frame, frame_age_ms;
     int16_t error, heading, near_error, near_heading, bottom_error;
@@ -14,6 +14,9 @@ typedef struct {
     uint8_t ring_stage, ring_guide, ring_source;
     int8_t ring_direction;
     uint8_t bridge_seen, bridge_passed, exit_armed, transition_frames;
+    int16_t imu_acc_forward, imu_acc_left, imu_acc_up;
+    int16_t imu_gyro_x, imu_gyro_y, imu_gyro_z, imu_yaw_rate10;
+    uint8_t imu_fresh, imu_bias_ready;
 } steering_log_record_t;
 typedef struct {
     uint32_t session, count, overwritten;

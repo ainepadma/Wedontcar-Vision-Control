@@ -612,7 +612,7 @@ void track_vision_filter_display(uint8_t *binary, uint16_t rows, uint16_t cols)
  * The existing guide samples and blue border are never moved. */
 static void track_continue_ring_road(const uint8_t *binary, uint16_t rows,
                                      uint16_t cols, const track_vision_result_t *road,
-                                     ring_corner_guide_t *guide)
+                                     ring_corner_guide_t *guide, unsigned inner)
 {
     static uint16_t center[TRACK_VISION_MAX_ROWS];
     static uint8_t valid[TRACK_VISION_MAX_ROWS];
@@ -642,7 +642,8 @@ static void track_continue_ring_road(const uint8_t *binary, uint16_t rows,
         if(x>=cols || !binary[y*cols+x]) continue;
         /* Left repair already owns the turn. A connected upper straight or
          * right fork must not replace its far end through a broad white cap. */
-        if(y<guide->active_top && x>center[seed]+cols/20U) continue;
+        if(y<guide->active_top && ((!inner && (int)x>(int)center[seed]+cols/20) ||
+                                    (inner && (int)x<(int)center[seed]-cols/20))) continue;
         /* Use the ordinary tracker's local continuity allowance. A far
          * candidate on the other side of a black island cannot take over. */
         unsigned allowance=cols*8U/100U+gap*cols*35U/1000U;
@@ -715,11 +716,12 @@ void track_ring_vision_process(track_ring_vision_state_t *s,const uint8_t *binar
     ring_corner_process(binary,rows,cols,0,&out->ring.corners);
     ring_corner_frame_t *v=&out->ring.corners;
     ring_corner_stabilize(binary,0,&s->corner_tracker,v);
-    /* The second and third LEFT repairs share the same ordinary continuation.
+    /* Both third repairs share the mirrored ordinary continuation.
      * Ordinary outputs remain available unchanged for an eventual handoff. */
     if(rows>=20U && rows<=TRACK_VISION_MAX_ROWS && cols>=32U && cols<=TRACK_VISION_MAX_COLS)
-        for(unsigned stage=3U;stage<=6U;++stage)
-            track_continue_ring_road(binary,rows,cols,out,&v->guide[ring_pdf_guide(stage,0U)]);
+        for(unsigned stage=5U;stage<=6U;++stage)
+            for(unsigned inner=0U;inner<2U;++inner)
+                track_continue_ring_road(binary,rows,cols,out,&v->guide[ring_pdf_guide(stage,inner)],inner);
     v->frame_number=out->frame_number;
     for(unsigned y=0;y<rows && y<TRACK_VISION_MAX_ROWS;++y) {
         out->raw_left[y]=v->border[0][y];out->raw_right[y]=v->border[1][y];

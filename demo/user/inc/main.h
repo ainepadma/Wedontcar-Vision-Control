@@ -40,6 +40,7 @@ extern imu_navigation_state_t imu_navigation;
 extern ring_control_state_t ring_control;
 extern volatile uint8_t imu_device_status;
 void assistant_uart_tx_irq_handler(void);
+void track_imu_init(void);
 void track_runtime_init(void);
 void track_frame_publish(const track_vision_result_t *result,
                          const stripe_brake_observation_t *stripe);
@@ -86,7 +87,7 @@ void track_frame_publish(const track_vision_result_t *result,
 // 10-21 那版是 0.038，后来降到 0.020 导致弯道舵量只有 60% 左右；
 // 0.030 让典型弯道（ERR≈150、H≈400）打到接近满舵。直道若开始左右修就是偏大。
 #define TRACK_STEER_KP 0.030f
-#define TRACK_STEER_KD 0.0005f
+#define TRACK_STEER_KD 0.0007f
 // 打满 11.5° 的耗时：120°/s 要 96ms，1.75m/s 下已跑出 17cm；180°/s 缩到 64ms。
 #define TRACK_SERVO_RATE_DEG_S 180.0f
 

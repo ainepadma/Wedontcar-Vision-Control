@@ -106,6 +106,38 @@ static volatile struct
     uint32_t observed_ms, generation, frame_number;
 } track_mailbox;
 
+/* Boot is the only caller before PIT starts; PIT owns samples thereafter. */
+static uint8_t track_imu_poll(uint8_t stationary)
+{
+    if (!imu_navigation.device_ready)
+        return 0U;
+    imu660rb_sample_t sample;
+    imu660rb_result_t status = imu660rb_read_sample(&sample);
+    imu_device_status = status;
+    if (status == IMU660RB_RESULT_ERROR)
+        imu_navigation.device_ready = 0U;
+    if (status != IMU660RB_RESULT_OK)
+        return 0U;
+    imu_navigation_observe(&imu_navigation, sample.acc_x, sample.acc_y, sample.acc_z,
+                           sample.gyro_x, sample.gyro_y, sample.gyro_z, stationary);
+    return 1U;
+}
+
+void track_imu_init(void)
+{
+    imu_device_status = imu660rb_init();
+    imu_navigation_init(&imu_navigation, imu_device_status == IMU660RB_RESULT_OK);
+    /* Use the original 200-sample GY average while drive PWM is still zero.
+     * Allow up to one extra second of NOT_READY; vision also runs without an IMU. */
+    for (unsigned elapsed = 0U;
+         elapsed < 3000U && imu_navigation.device_ready && !imu_navigation.bias_ready;
+         elapsed += SPEED_CONTROL_PERIOD_MS)
+    {
+        system_delay_ms(SPEED_CONTROL_PERIOD_MS);
+        track_imu_poll(1U);
+    }
+}
+
 void track_runtime_init(void)
 {
     const track_control_config_t config = {
@@ -186,23 +218,7 @@ void PIT_IRQHandler(void)
     {
         control_clock_ms += SPEED_CONTROL_PERIOD_MS;
         uint8_t was_running = motor_enabled;
-        uint8_t yaw_fresh = 0U;
-        if (imu_navigation.device_ready)
-        {
-            imu660rb_sample_t sample;
-            imu660rb_result_t imu_result = imu660rb_read_sample(&sample);
-            imu_device_status = imu_result;
-            if (imu_result == IMU660RB_RESULT_OK)
-            {
-                yaw_fresh = 1U;
-                imu_navigation_observe(&imu_navigation,
-                    sample.acc_x, sample.acc_y, sample.acc_z,
-                    sample.gyro_x, sample.gyro_y, sample.gyro_z,
-                    (uint8_t)!was_running);
-            }
-            else if (imu_result == IMU660RB_RESULT_ERROR)
-                imu_navigation.device_ready = 0U;
-        }
+        uint8_t yaw_fresh = track_imu_poll((uint8_t)!was_running);
         // 独立于图像主循环：30ms 去抖，长按不连发，上电按住不启动。
         uint8_t button_pressed = motor_switch_sample(&motor_switch_state,
                                                      gpio_get_level(MOTOR_TOGGLE_KEY) == GPIO_LOW);
@@ -359,11 +375,13 @@ void PIT_IRQHandler(void)
                           ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
                 fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
         }
-        /* Stripe brake is active even before C13, independent of C14. */
+        /* C14 enables stripe arming; a completed stop remains latched. */
         uint8_t stripe_just_latched = 0U;
 #if !SERVO_CENTER_TEST_MODE && !SPEED_BENCH_MODE
         const stripe_brake_observation_t stripe_observation = track_mailbox.stripe;
-        if (fresh_ring_frame && !stripe_brake.stopped &&
+        if (!protection_enabled && !stripe_brake.stopped)
+            stripe_brake_init(&stripe_brake);
+        if (protection_enabled && fresh_ring_frame && !stripe_brake.stopped &&
             stripe_brake_observe(&stripe_brake, &stripe_observation,
                                  track_mailbox.observed_ms, control_clock_ms))
         {
@@ -517,7 +535,10 @@ void PIT_IRQHandler(void)
             ring_control.corner_stage, ring_control.corner_guide_id,
             ring_control_path_source(&ring_control), ring_control.direction,
             ring_control.bridge_seen, ring_control.bridge_passed,
-            ring_control.exit_armed, ring_control.transition_frames
+            ring_control.exit_armed, ring_control.transition_frames,
+            imu_navigation.acc_forward, imu_navigation.acc_left, imu_navigation.acc_up,
+            imu_navigation.gyro_x_raw, imu_navigation.gyro_y_raw, imu_navigation.gyro_z_raw,
+            (int16_t)(imu_navigation.yaw_rate_dps * 10.0f), yaw_fresh, imu_navigation.bias_ready
         };
         steering_log_tick(&log_record);
         pit_flag_clear(PIT_CH0);

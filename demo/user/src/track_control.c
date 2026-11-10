@@ -13,7 +13,7 @@
 /* 只影响“弯还没到近处”这个阶段：近处一旦出现弯（aligned=1），
  * heading_weight 会升到 TRACK_HEADING_WEIGHT，弯中转向强度不受这里影响。
  * 0.55 时入弯偏早，降到 0.35 把前瞻压下来；仍偏早就再降，弯中拐不动请调 KP 而不是这里。 */
-#define TRACK_APPROACH_HEADING_WEIGHT 0.05
+#define TRACK_APPROACH_HEADING_WEIGHT 0.10
 #define TRACK_NEAR_BEND_START 30.0
 #define TRACK_NEAR_BEND_FULL 120.0
 #define TRACK_BEND_P_BOOST 0.40

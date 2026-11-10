@@ -190,7 +190,7 @@ static void features(unsigned h,unsigned w,unsigned side,ring_corner_frame_t *f)
         float x=edge[side][i][0],y=edge[side][i][1];
         float dx0=(float)edge[side][i-r][0]-x,dy0=(float)edge[side][i-r][1]-y;
         float dx1=(float)edge[side][i+r][0]-x,dy1=(float)edge[side][i+r][1]-y;
-        if(y<h*.20f || y>h*.88f || x<w*.08f || x>w*.92f) continue;
+        if(y<h*.20f || y>h*.88f || x<(w-1U)*.08f || x>(w-1U)*.92f) continue;
         if(dy0<=0 && dy1<=0 && dy0+dy1<-(float)r*.45f && dx0*dx1<0 && fabsf(dx0)+fabsf(dx1)>r*.6f)
             if(!f->v[side].quality || y>f->v[side].y) f->v[side]=point(x,y,RING_CORNER_B);
     }
@@ -308,59 +308,23 @@ static void finish(const uint8_t *im,unsigned h,unsigned w,ring_corner_guide_t *
     g->error=(int16_t)clamp((sum/weight*2/(w-1)-1)*1000,-1000,1000);
     g->heading=(int16_t)clamp((fs/fc-ns/nc)*2000/(w-1),-1000,1000);g->valid=1;
 }
-/* The upper entry shoulder has a steep arm toward the main lane.
- * An isolated black island has white between its tip and the upper roof. */
-static int entry_roof(const uint8_t *im,unsigned w,int x,int y)
-{
-    unsigned white_run=0;
-    for(int row=y-3;row>=0;--row) {
-        white_run=im[(unsigned)row*w+(unsigned)x] ? white_run+1U : 0U;
-        if(white_run>=3U) return 0;
-    }
-    return 1;
-}
-static void upper_entry_v(const uint8_t *im,unsigned h,unsigned w,ring_corner_frame_t *f)
-{
-    unsigned r=h/30U+3U;
-    for(unsigned trace_side=0;trace_side<2;++trace_side) {
-        for(unsigned i=r;i+r<length[trace_side];++i) {
-            int x=edge[trace_side][i][0],y=edge[trace_side][i][1];
-            if(y<h*.20f || y>h*.55f || x<w*.08f || x>w*.92f) continue;
-            unsigned inner=(unsigned)(x>(w-1)*.5f),other=1U-inner;
-            ring_corner_point_t *tip=&f->entry_v[inner];
-            int toward=inner ? -1 : 1;
-            if(!valid(other,h-2) || (tip->quality && y>=tip->y)) continue;
-            int dx0=(edge[trace_side][i-r][0]-x)*toward;
-            int dx1=(edge[trace_side][i+r][0]-x)*toward;
-            if(dx0*dx1>=0) continue;
-            int rise0=y-edge[trace_side][i-r][1],rise1=y-edge[trace_side][i+r][1];
-            int rise=dx0>0 ? rise0 : rise1,other_rise=dx0>0 ? rise1 : rise0;
-            int run=dx0>0 ? dx0 : dx1;
-            if(other_rise<0 || rise<r*.60f || rise<run || rise+1<other_rise) continue;
-            if(!entry_roof(im,w,x,y) && !entry_roof(im,w,x-2*toward,y)) continue;
-            *tip=point(x,y,RING_CORNER_B);
-        }
-    }
-}
-static void inner_v_guide(ring_corner_guide_t *g,unsigned inner,unsigned h,
-                          const ring_corner_point_t *tip)
-{
-    unsigned outer=1U-inner;
-    g->clip_upper=1;
-    if(!tip->quality) return;
-    g->corner_side=(uint8_t)inner;g->corner_kind=RING_CORNER_B;
-    g->corner_x=tip->x;g->corner_y=tip->y;
-    segment(g,outer,tip->x,tip->y,b[outer][h-2],h-1);
-}
-
 /* Keep the near center on the original offset. Steer the far center
  * inward only through white pixels in the same run as that offset. */
-static unsigned third_left_center(const uint8_t *row,unsigned x,unsigned w,float progress)
+static unsigned third_center(const uint8_t *row,unsigned x,unsigned w,float progress,unsigned inner)
 {
     float amount=ring_third_left_center_shift;
     if(!isfinite(amount)) amount=.45f;
     float bend=progress*progress*(3.f-2.f*progress);
     unsigned shift=(unsigned)(w*clamp(amount,0.f,.65f)*bend+.5f);
+    if(inner) {
+        unsigned limit=shift<w-1U-x ? x+shift : w-1U, start=x;
+        while(x<limit && row[x+1U]) ++x;
+        if(x<limit || x==w-1U) {
+            unsigned room=x-start;
+            x-=room<2U ? room : 2U;
+        }
+        return x;
+    }
     unsigned limit=x>shift ? x-shift : 0U, start=x;
     while(x>limit && row[x-1U]) --x;
     if(x>limit || x==0U) {
@@ -396,12 +360,13 @@ static void third_finish(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
         float border=line_x(line,(float)y);
         float center=border+(inner ? half : -half);
         int ok=y>=top && center>=0.f && center<w-1.f;
-        unsigned x=(unsigned)clamp(center,0,w-1);
+        unsigned x=inner ? w-1U-(unsigned)clamp((w-1.f)-center,0,w-1) :
+                           (unsigned)clamp(center,0,w-1);
         if(ok && !im[y*w+x]) ok=0;
-        if(ok && !inner && y<near_start) {
+        if(ok && y<near_start) {
             float progress=(float)(near_start-y)/(near_start-top);
-            unsigned shifted=third_left_center(im+y*w,x,w,progress);
-            center-=(float)(x-shifted);
+            unsigned shifted=third_center(im+y*w,x,w,progress,inner);
+            center+=(float)((int)shifted-(int)x);
             x=shifted;
         }
         unsigned index=0;
@@ -413,7 +378,7 @@ static void third_finish(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
                 g->center[index]=(uint16_t)x;g->center_valid|=(uint16_t)(1U<<index);
                 if(linked && index) {
                     unsigned previous=(index-1U)*(h-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
-                    if(inner || third_center_link_white(im,w,previous,g->center[index-1U],y,x))
+                    if(third_center_link_white(im,w,previous,g->center[index-1U],y,x))
                         g->center_link_valid|=(uint16_t)(1U<<index);
                 }
             }
@@ -496,6 +461,21 @@ static int third_reacquire(unsigned h,unsigned w,unsigned outer,
         if(distance<best) {best=distance;*tip=point(x,(float)y,RING_CORNER_A);}
     }
     return best<1e9f;
+}
+static ring_corner_point_t bridge_tip(unsigned h,unsigned w,unsigned side)
+{
+    ring_corner_point_t tip;memset(&tip,0,sizeof(tip));
+    unsigned radius=h/16U;if(radius<4U) radius=4U;
+    float best=0.f;
+    for(unsigned y=h/6U;y+radius+3U<h*9U/10U;++y) {
+        if(y<=radius+2U || !valid(side,y-radius) || !valid(side,y) || !valid(side,y+radius)) continue;
+        float here=profile(side,(int)y,w),before=profile(side,(int)(y-radius),w),after=profile(side,(int)(y+radius),w);
+        float up=here-before,down=here-after;
+        if(up<w*.025f || down<w*.015f) continue;
+        float score=fminf(up,down);
+        if(score>best) {best=score;tip=point(side ? w-1.f-here : here,y,RING_CORNER_A);}
+    }
+    return tip;
 }
 /* A local maximum on the outside edge, supported on both arms. */
 static int third_tip_at(unsigned w,unsigned side,unsigned y,unsigned radius,ring_corner_point_t *tip)
@@ -746,8 +726,16 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
     }
     /* A contour may traverse the whole roof after the two tracers meet.
      * Assign its V tip by native lateral location, not the tracer of origin. */
-    if(f->v[0].quality && f->v[0].x>w*.55f) {f->v[1]=f->v[0];memset(&f->v[0],0,sizeof(f->v[0]));}
-    if(f->v[1].quality && f->v[1].x<w*.45f) {f->v[0]=f->v[1];memset(&f->v[1],0,sizeof(f->v[1]));}
+    ring_corner_point_t original_v[2]={f->v[0],f->v[1]};
+    int move_left=original_v[0].quality && original_v[0].x>(w-1U)*.55f;
+    int move_right=original_v[1].quality && original_v[1].x<(w-1U)*.45f;
+    if(move_left && move_right) {
+        f->v[0]=original_v[1];f->v[1]=original_v[0];
+    } else if(move_left && !original_v[1].quality) {
+        f->v[1]=original_v[0];memset(&f->v[0],0,sizeof(f->v[0]));
+    } else if(move_right && !original_v[0].quality) {
+        f->v[0]=original_v[1];memset(&f->v[1],0,sizeof(f->v[1]));
+    }
     f->paired=(uint8_t)(!f->bottom_open[0] && !f->bottom_open[1]);
     f->road_clear=(uint8_t)(f->paired && !f->gap[0] && !f->gap[1] && f->quality[0]>65 && f->quality[1]>65);
     for(unsigned side=0;side<2;++side) {
@@ -781,7 +769,7 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         finish(im,h,w,connected);
     }
     if(connected->valid) *cross=*connected;
-    upper_entry_v(im,h,w,f);
+    for(unsigned side=0;side<2;++side) f->bridge_tip[side]=bridge_tip(h,w,side);
     late_exit_features(im,h,w,f);
     for(unsigned side=0;side<2;++side) third_candidates(im,h,w,side,f);
     for(unsigned side=0;side<2;++side) for(unsigned stage=1;stage<=7;++stage) {
@@ -792,10 +780,10 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         g->corner_side=(uint8_t)side;g->corner_x=a.x;g->corner_y=a.y;
         if(stage==1 && a.quality && p.quality) segment(g,side,p.x,p.y,a.x,a.y);
         if(stage==2 && p.quality) segment(g,side,p.x,p.y,outer,h-1);
-        if(stage==3) inner_v_guide(g,side,h,f->entry_v[side].quality ? &f->entry_v[side] : &v);
+        if(stage==3 && v.quality) segment(g,other,v.x,v.y,b[other][h-2],h-1);
         if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);
         if(stage==7) {exit_connection(im,h,w,side,f,g);continue;}
-        if(stage==4) g->clip_upper=1;
+        if(stage==3 || stage==4) g->clip_upper=1;
         if(g->boundary[0].valid || g->boundary[1].valid) finish(im,h,w,g);
     }
     /* Preview starts at the recognized entry, never guesses a motion stage. */
@@ -916,11 +904,9 @@ void ring_corner_stabilize(const uint8_t *im,const ring_corner_context_t *ctx,ri
             if(vertex.quality) {
                 f->v[side]=vertex;f->v_reacquired|=(uint8_t)(1U<<side);
                 unsigned other=1U-side;
-                if(!f->entry_v[side].quality) {
-                    ring_corner_guide_t *g=&f->guide[ring_pdf_guide(3,side)];memset(g,0,sizeof(*g));
-                    inner_v_guide(g,side,f->rows,&vertex);finish(im,f->rows,f->cols,g);
-                }
-                ring_corner_guide_t *g=&f->guide[ring_pdf_guide(4,other)];memset(g,0,sizeof(*g));
+                ring_corner_guide_t *g=&f->guide[ring_pdf_guide(3,side)];memset(g,0,sizeof(*g));
+                g->clip_upper=1;segment(g,other,vertex.x,vertex.y,b[other][f->rows-2],f->rows-1);finish(im,f->rows,f->cols,g);
+                g=&f->guide[ring_pdf_guide(4,other)];memset(g,0,sizeof(*g));
                 g->clip_upper=1;segment(g,side,vertex.x,vertex.y,side ? f->cols-1.f : 0.f,f->rows-1);finish(im,f->rows,f->cols,g);
                 g=&f->guide[ring_pdf_guide(7,side)];memset(g,0,sizeof(*g));
                 exit_connection(im,f->rows,f->cols,side,f,g);

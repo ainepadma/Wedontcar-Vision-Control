@@ -31,7 +31,7 @@ int main(void)
 {
     for(unsigned side=0;side<2;++side) {
         reset(side);guide(3,side,-200);
-        obs.corners.v[side].quality=90;
+        obs.corners.v[side].quality=90;obs.corners.v[side].x=side ? 243.f : 60.f;
         assert(step(100).error==-200 && ring_control_path_source(&state)==RING_SOURCE_GUIDE);
         memset(obs.corners.guide,0,sizeof(obs.corners.guide));
         obs.corners.v[side].quality=0;
@@ -40,12 +40,15 @@ int main(void)
 
         guide(4,side,-150);
         obs.corners.v[1U-side].quality=90;obs.corners.v[1U-side].y=70;
+        obs.corners.v[1U-side].x=side ? 83.f : 220.f;
         assert(step(140).error==-150 && state.corner_stage==3);
-        assert(step(160).error==-150 && state.corner_stage==3);
+        assert(step(160).error==-150 && state.corner_stage==4);
         assert(step(180).error==-150 && state.corner_stage==4);
 
         obs.corners.v[1U-side].quality=0;
-        obs.corners.v[side].quality=90; /* A stale inner V cannot restart the second line. */
+        obs.corners.guide[ring_pdf_guide(4,side)].valid=0;
+        obs.corners.paired=1;
+        obs.corners.v[side].quality=90;obs.corners.v[side].x=side ? 243.f : 60.f; /* A stale inner V cannot restart the second line. */
         guide(3,side,-900);
         assert(step(200).error==-150 && state.corner_guide_held);
         assert(step(220).error==-150 && state.corner_guide_held);
@@ -60,7 +63,8 @@ int main(void)
         assert(step(20).error==-200);
         memset(obs.corners.guide,0,sizeof(obs.corners.guide));
         step(40);
-        assert(step(60).error==500 && state.corner_stage==5); /* Opposite V was never visible. */
+        assert(step(60).error==-200 && state.corner_stage==3 && state.corner_guide_held);
+        assert(step(141).error==500 && state.corner_stage==3); /* Missing corners cannot prove a handoff. */
     }
     reset(0);state.corner_have_guide=1;state.corner_guide_id=ring_pdf_guide(2,0);
     state.selected_path=(track_path_observation_t){-700,-700,1,100};

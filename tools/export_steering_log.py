@@ -53,7 +53,7 @@ def receive(port, output, timeout=600):
                     raise RuntimeError(f'Export interrupted: {line!r}')
                 if not header_seen:
                     columns = len(line.rstrip().split(b','))
-                    if not line.startswith(b'ms,frame,frame_age_ms,') or columns not in (25, 33):
+                    if not line.startswith(b'ms,frame,frame_age_ms,') or columns not in (25, 33, 42):
                         raise ValueError('Invalid CSV header')
                     header_seen = True
                 else:

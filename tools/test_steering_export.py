@@ -67,6 +67,7 @@ int main(void){
  motor_enabled=1;rx="LOG\n";steering_log_service();assert(strstr((char*)camera_tx_packet,"ERROR RUNNING"));camera_tx_length=0;steering_log_service();
  r.ms=30;r.error=-100;r.ring_stage=6;r.ring_guide=19;r.ring_source=1;r.ring_direction=1;
  r.bridge_seen=1;r.bridge_passed=1;r.exit_armed=0;r.transition_frames=2;
+ r.imu_gyro_y=-1000;r.imu_yaw_rate10=700;r.imu_fresh=1;r.imu_bias_ready=1;
  steering_log_tick(&r);r.running=0;r.ms=40;r.stop_reason=1;steering_log_tick(&r);motor_enabled=0;
  rx="LOG\n";steering_log_service();
  while(log_export_state){if(camera_tx_length){fwrite(camera_tx_packet,1,camera_tx_length,stdout);camera_tx_length=0;}steering_log_service();}
@@ -93,7 +94,8 @@ int main(void){
             self.assertEqual(exporter.receive(port,output),3)
             self.assertEqual(len(output.read_text().splitlines()),4)
             rows = list(csv.DictReader(io.StringIO(output.read_text())))
-            self.assertEqual(len(rows[-1]),33)
+            self.assertEqual(len(rows[-1]),42)
+            self.assertEqual([rows[-1][k] for k in ('imu_gyro_y','imu_yaw_rate10','imu_fresh','imu_bias_ready')], ['-1000','700','1','1'])
             self.assertEqual((rows[0]['ring_stage'],rows[0]['ring_source'],rows[0]['servo10']),('7','4','870'))
             self.assertEqual([rows[-1][k] for k in ('ring_stage','ring_guide','ring_source','ring_direction',
                              'bridge_seen','bridge_passed','exit_armed','transition_frames')],
