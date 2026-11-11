@@ -69,6 +69,7 @@ static motor_overspeed_watchdog_t motor_overspeed_watchdog;
 static track_control_state_t track_control;
 volatile uint8_t track_stripe_brake_status;
 static stripe_brake_state_t stripe_brake;
+static stripe_brake_start_gate_t stripe_start_gate;
 static float stripe_brake_servo_angle;
 
 /* Only the stripe stop uses signed drive. Zero PWM before changing DIR. */
@@ -120,6 +121,7 @@ void track_runtime_init(void)
     };
     track_control_init(&track_control, &config);
     stripe_brake_init(&stripe_brake);
+    stripe_brake_start_gate_init(&stripe_start_gate);
     track_stripe_brake_status = 0U;
     stripe_brake_servo_angle = SERVO_MOTOR_CENTER;
     ring_control_init(&ring_control);
@@ -252,6 +254,8 @@ void PIT_IRQHandler(void)
             {
                 ring_control_init(&ring_control); // C13 starts a new run: clear faults and 270/360 completion records
                 track_control_toggle(&track_control, control_clock_ms);
+                if (track_control.running)
+                    stripe_brake_start_gate_begin(&stripe_start_gate);
                 steering_log_start();
             }
         }
@@ -359,11 +363,22 @@ void PIT_IRQHandler(void)
                           ring_control.path_mode == TRACK_PATH_NORMAL && !ring_control.line_active),
                 fresh_ring_frame ? track_mailbox.observed_ms : control_clock_ms);
         }
-        /* Stripe brake is active even before C13, independent of C14. */
+        /* Complete the measured crossing even when no new camera frame arrives. */
         uint8_t stripe_just_latched = 0U;
 #if !SERVO_CENTER_TEST_MODE && !SPEED_BENCH_MODE
         const stripe_brake_observation_t stripe_observation = track_mailbox.stripe;
-        if (fresh_ring_frame && !stripe_brake.stopped &&
+        const uint8_t stripe_enabled = stripe_brake_start_gate_tick(&stripe_start_gate,
+            track_control.running, fresh_ring_frame, &stripe_observation,
+            encoder_data_1, encoder_data_2);
+        if (stripe_enabled &&
+            stripe_brake_advance(&stripe_brake, encoder_data_1, encoder_data_2))
+        {
+            stripe_just_latched = 1U;
+            stripe_brake_servo_angle = track_control.servo_angle;
+            Pid_Reset(&speed_pid_l);
+            Pid_Reset(&speed_pid_r);
+        }
+        if (stripe_enabled && fresh_ring_frame && !stripe_brake.stopped &&
             stripe_brake_observe(&stripe_brake, &stripe_observation,
                                  track_mailbox.observed_ms, control_clock_ms))
         {
@@ -373,7 +388,8 @@ void PIT_IRQHandler(void)
             Pid_Reset(&speed_pid_r);
         }
 #endif
-        track_stripe_brake_status = stripe_brake.stopped ? 2U : (stripe_brake.armed ? 1U : 0U);
+        track_stripe_brake_status = stripe_brake.stopped ? 2U :
+            (stripe_brake.crossing ? 3U : (stripe_brake.armed ? 1U : 0U));
         if (protection_enabled && ring_control.fault)
             track_control_stop(&track_control, TRACK_STOP_RING);
         /* This runs every control tick, even with no camera frame or C13. */
@@ -387,6 +403,8 @@ void PIT_IRQHandler(void)
         // limits as ordinary following. No legacy 360 output may overwrite it.
         if (ring_control.line_active)
             output.target_speed *= constrain_float(RING_STRAIGHT_SPEED_SCALE, 0.1f, 1.0f);
+        if (stripe_brake.crossing && output.target_speed > STRIPE_BRAKE_APPROACH_SPEED)
+            output.target_speed = STRIPE_BRAKE_APPROACH_SPEED;
 #if SPEED_BENCH_MODE
         // 架空时不依赖摄像头识别，也不让视觉转向改变两轮目标。
         output.servo_angle = SERVO_MOTOR_CENTER;
@@ -410,12 +428,12 @@ void PIT_IRQHandler(void)
 #elif SPEED_BENCH_MODE
             (speed_full_enabled ? TRACK_SPEED_FULL_STRAIGHT : 80.0f);
 #else
-            (speed_full_enabled
+            (stripe_brake.crossing ? output.target_speed : (speed_full_enabled
                 ? TRACK_SPEED_FULL_CURVE_MIN +
                     constrain_float((output.target_speed - TRACK_SPEED_CURVE_MIN) /
                         (TRACK_SPEED_STRAIGHT - TRACK_SPEED_CURVE_MIN), 0.0f, 1.0f) *
                     (TRACK_SPEED_FULL_STRAIGHT - TRACK_SPEED_FULL_CURVE_MIN)
-                : output.target_speed);
+                : output.target_speed));
 #endif
         // 每10ms最多增加3个计数目标；减速立即更新目标，保持弯道降速响应。
         static float ramped_counts;

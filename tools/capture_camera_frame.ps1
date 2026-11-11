@@ -2,8 +2,8 @@ param(
     [string]$Port = 'COM6',
     [int]$Baud = 115200,
     [ValidateRange(1, 2147483647)][int]$Frames = 2,
-    [ValidateRange(1, 752)][int]$Width = 376,
-    [ValidateRange(1, 480)][int]$Height = 240,
+    [ValidateRange(1, 752)][int]$Width = 304,
+    [ValidateRange(1, 480)][int]$Height = 154,
     [ValidateRange(1, 86400)][int]$TimeoutSeconds = 60,
     [Parameter(Mandatory = $true)][string]$OutputDirectory
 )

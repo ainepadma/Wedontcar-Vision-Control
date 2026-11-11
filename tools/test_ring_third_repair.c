@@ -37,12 +37,15 @@ static void check_center(unsigned inner)
         float offset=(inner ? 1.f : -1.f)*304.f*.30f;
         float baseline=at(l,(float)y)+offset;
         assert(y>=g->active_top && image[y*304+x]);
-        if(inner || y>=near_start) assert(fabsf(x-baseline)<1.01f);
+        if(y>=near_start) assert(fabsf(x-baseline)<1.01f);
         else {
-            assert(x<=baseline && baseline-x<=304.f*ring_third_left_center_shift+1.f);
-            for(unsigned xx=x;xx<=(unsigned)baseline;++xx) assert(image[y*304+xx]);
+            float inward=inner ? x-baseline : baseline-x;
+            assert(inward>=-1.f && inward<=304.f*ring_third_left_center_shift+1.f);
+            unsigned from=inner ? (unsigned)baseline : x;
+            unsigned to=inner ? x : (unsigned)baseline;
+            for(unsigned xx=from;xx<=to;++xx) assert(image[y*304+xx]);
         }
-        if(i && !inner && (g->center_link_valid&(1U<<i))) {
+        if(i && (g->center_link_valid&(1U<<i))) {
             unsigned y0=(i-1U)*153U/15U,x0=g->center[i-1U];
             for(unsigned row=y0+1U;row<y;++row) {
                 unsigned col=(x0*(y-row)+x*(row-y0))/(y-y0);
@@ -73,19 +76,18 @@ static void prefer_near_tip(unsigned inner)
     assert(parallel.valid && guide(inner)->valid);
     assert(!memcmp(parallel.boundary,guide(inner)->boundary,sizeof(parallel.boundary)));
     assert(parallel.center_valid==guide(inner)->center_valid);
-    assert(inner ? parallel.heading==guide(inner)->heading : guide(inner)->heading<parallel.heading);
-    if(inner) assert(!memcmp(parallel.center,guide(inner)->center,sizeof(parallel.center)));
+    assert(inner ? guide(inner)->heading>parallel.heading : guide(inner)->heading<parallel.heading);
     check_center(inner);
     assert(guide(inner)->corner_y>=93.f && guide(inner)->corner_y<=96.f);
     assert(fabsf(guide(inner)->corner_x-(inner ? 41.f : 262.f))<=2.f);
-    if(!inner) {
-        const ring_corner_guide_t *g=guide(inner);
-        const ring_corner_line_t *line=&g->boundary[1];
-        unsigned bent=0;
-        for(unsigned i=0;i<16;++i) if(g->center_valid&(1U<<i))
-            if(at(line,(float)(i*153U/15U))-304.f*.30f-g->center[i]>4.f) ++bent;
-        assert(bent>=2);
+    const ring_corner_guide_t *g=guide(inner);
+    const ring_corner_line_t *line=&g->boundary[1U-inner];
+    unsigned bent=0;
+    for(unsigned i=0;i<16;++i) if(g->center_valid&(1U<<i)) {
+        float baseline=at(line,(float)(i*153U/15U))+(inner ? 1.f : -1.f)*304.f*.30f;
+        if((inner ? g->center[i]-baseline : baseline-g->center[i])>4.f) ++bent;
     }
+    assert(bent>=2);
 }
 int main(int argc,char **argv)
 {

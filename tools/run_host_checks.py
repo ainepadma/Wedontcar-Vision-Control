@@ -18,7 +18,7 @@ def main():
     environment=os.environ.copy()
     environment['CPATH']=str(include)+(os.pathsep+environment['CPATH'] if environment.get('CPATH') else '')
     environment['PYTHONIOENCODING']='utf-8'
-    names=['test_ring_third_repair.ps1','test_ring_road_continuation.ps1','test_ring_revision4.ps1','test_ring_visual_exit.ps1',
+    names=['test_ring_entry_shoulder.ps1','test_ring_third_repair.ps1','test_ring_road_continuation.ps1','test_ring_revision4.ps1','test_ring_visual_exit.ps1',
            'test_track_control.ps1','test_motor_switch.ps1','test_pid.ps1']
     if args.full:names=[p.name for p in sorted((root/'tools').glob('test_*.ps1'))]
     names+=['test_stripe_brake.py','test_stop_diagnostics.py','test_steering_export.py']

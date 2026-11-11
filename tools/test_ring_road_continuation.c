@@ -9,6 +9,16 @@ static ring_corner_frame_t raw;
 static ring_corner_tracker_t raw_tracker;
 static track_ring_vision_state_t model;
 static ring_control_state_t control;
+static int same_boundaries(const ring_corner_guide_t *a,const ring_corner_guide_t *b)
+{
+ for(unsigned side=0;side<2U;++side) {
+  const ring_corner_line_t *x=&a->boundary[side],*y=&b->boundary[side];
+  if(x->valid!=y->valid) return 0;
+  if(x->valid && (x->x0!=y->x0 || x->y0!=y->y0 ||
+                  x->x1!=y->x1 || x->y1!=y->y1)) return 0;
+ }
+ return 1;
+}
 int main(int argc,char **argv)
 {
  CHECK(argc==2);char path[1024];snprintf(path,sizeof(path),"%s/outer_v.bin",argv[1]);
@@ -28,7 +38,7 @@ int main(int argc,char **argv)
   result.frame_number=frame+1;track_ring_vision_process(&model,image,154,304,&result);
   const ring_corner_guide_t *g=&result.ring.corners.guide[ring_pdf_guide(4,0)];
   CHECK(g->valid && result.error==error && result.heading==heading && result.valid==valid);
-  CHECK(!memcmp(g->boundary,baseline.boundary,sizeof(g->boundary)));
+  CHECK(same_boundaries(g,&baseline));
   CHECK((g->center_valid&baseline.center_valid)==baseline.center_valid);
   unsigned added=0;
   for(unsigned i=0;i<16;++i) if(g->center_valid&(1U<<i)) {
@@ -54,6 +64,50 @@ int main(int argc,char **argv)
   if(frame)CHECK(abs(selected.heading-previous_heading)<100);
   previous_heading=selected.heading;control.reset_tracking_history=0;
  }
+ /* The same road and guide, reflected horizontally, must extend the right
+  * repair and remain the path selected by the right-ring controller. */
+ for(unsigned y=0;y<154U;++y)
+  for(unsigned x=0;x<304U;++x)
+   image[y*304U+x]=original[y*304U+303U-x];
+ memset(&raw_tracker,0,sizeof(raw_tracker));track_ring_vision_init(&model);
+ track_vision_process(image,154,304,&result);
+ ring_corner_process(image,154,304,0,&raw);
+ ring_corner_stabilize(image,0,&raw_tracker,&raw);
+ baseline=raw.guide[ring_pdf_guide(4,1)];CHECK(baseline.valid);
+ result.frame_number=1U;track_ring_vision_process(&model,image,154,304,&result);
+ const ring_corner_guide_t *right=&result.ring.corners.guide[ring_pdf_guide(4,1)];
+ CHECK(right->valid && right->active_top<baseline.active_top);
+ unsigned right_added=0U;
+ for(unsigned i=0;i<RING_CORNER_CENTER_SAMPLES;++i)
+  if((right->center_valid&(1U<<i)) && !(baseline.center_valid&(1U<<i))) ++right_added;
+ CHECK(right_added>=5U);
+ ring_control_init(&control);control.action_locked=1;control.kind=TRACK_RING_360;
+ control.direction=-1;control.corner_stage=4;
+ ring_control_observe(&control,&result.ring,20U,1U);
+ track_path_observation_t right_path=ring_control_select_path(&control,&result.ring);
+ CHECK(control.corner_guide_id==16U && right_path.valid);
+ CHECK(right_path.error==right->error && right_path.heading==right->heading);
+ puts("PASS mirrored right S4 road continuation reaches the selected control path");
+ snprintf(path,sizeof(path),"%s/entry.bin",argv[1]);
+ file=fopen(path,"rb");CHECK(file && fread(original,1,sizeof(original),file)==sizeof(original));fclose(file);
+ for(unsigned y=0;y<154U;++y)
+  for(unsigned x=0;x<304U;++x)
+   image[y*304U+x]=original[y*304U+303U-x];
+ track_ring_vision_init(&model);ring_control_init(&control);
+ for(unsigned n=0;n<RING_CONFIRM_FRAMES;++n) {
+  track_vision_process(image,154,304,&result);
+  result.frame_number=n+1U;
+  track_ring_vision_process(&model,image,154,304,&result);
+  CHECK(result.ring.corners.entry[1] && !result.ring.corners.entry[0]);
+  ring_control_observe(&control,&result.ring,20U*(n+1U),1U);
+  ring_control_select_path(&control,&result.ring);
+ }
+ CHECK(control.action_locked && control.kind==TRACK_RING_360 && control.direction==-1);
+ CHECK(control.corner_guide_id==ring_pdf_guide(1,1) && control.selected_path.valid);
+ CHECK(control.selected_path.error>0);
+ puts("PASS mirrored right entry survives full vision and locks right direction");
+ snprintf(path,sizeof(path),"%s/outer_v.bin",argv[1]);
+ file=fopen(path,"rb");CHECK(file && fread(original,1,sizeof(original),file)==sizeof(original));fclose(file);
  /* The white road does not disappear when the ordinary detector misses
   * two rows. The already pixel-checked connection must remain drawable. */
  memcpy(image,original,sizeof(image));track_ring_vision_init(&model);

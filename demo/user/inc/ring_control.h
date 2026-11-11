@@ -58,6 +58,7 @@ typedef struct {
     uint32_t separator_frame;
     uint32_t corner_frame_number,corner_guide_frame_number,corner_last_guide_ms;
     uint32_t last_frame_ms,last_tick_ms,event_started_ms,phase_started_ms,event_id;
+    uint32_t rearm_road_started_ms;
     float yaw_progress_deg,travel_counts;
     ring_corner_guide_t corner_selected_guide;
     track_path_observation_t selected_path;

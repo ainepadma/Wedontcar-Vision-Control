@@ -62,6 +62,11 @@ int main(int argc,char **argv)
         "ordinary_p1_alternate","ordinary_p2_alternate","ordinary_p9_alternate","ordinary_p10_alternate"};
     for(unsigned i=0;i<8;++i) {
         load_fixture(argv[1],ordinary[i]);ring_corner_process(test_image,154,304,0,&test_frame);
+        if(test_frame.entry[0] || test_frame.entry[1])
+            fprintf(stderr,"False entry on %s: %u/%u A0=%g,%g P0=%g,%g A1=%g,%g P1=%g,%g Q=%u/%u\n",ordinary[i],test_frame.entry[0],test_frame.entry[1],
+                test_frame.a[0].x,test_frame.a[0].y,test_frame.p[0].x,test_frame.p[0].y,
+                test_frame.a[1].x,test_frame.a[1].y,test_frame.p[1].x,test_frame.p[1].y,
+                test_frame.quality[0],test_frame.quality[1]);
         assert(!test_frame.entry[0] && !test_frame.entry[1]);
     }
     puts("PASS eight ordinary-road images rejected as 360 entries");

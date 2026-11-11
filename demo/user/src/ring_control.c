@@ -174,10 +174,13 @@ void ring_control_observe(ring_control_state_t *s,const track_ring_observation_t
     s->have_frame=1;s->corner_frame_number=f->frame_number;s->last_frame_ms=now;
     if(s->phase==RING_STATE_COOLDOWN) {
         if(s->kind==TRACK_RING_360) {
-            if(exit_lane_visible(obs) && exit_lane_aligned(obs)) {if(s->clear_frames<255U) ++s->clear_frames;}
+            if(exit_lane_visible(obs) && exit_lane_aligned(obs)) {
+                if(!s->clear_frames) s->rearm_road_started_ms=now;
+                if(s->clear_frames<255U) ++s->clear_frames;
+            }
             else s->clear_frames=0;
             if(s->clear_frames>=RING_360_REARM_FRAMES &&
-               (uint32_t)(now-s->phase_started_ms)>=RING_360_REARM_MS) {
+               (uint32_t)(now-s->rearm_road_started_ms)>=RING_360_REARM_MS) {
                 s->phase=RING_STATE_IDLE;s->clear_frames=0;s->vote_frames=0;
             }
         } else if(confirmed(s,f->road_clear)) {s->phase=RING_STATE_IDLE;s->transition_frames=0;}

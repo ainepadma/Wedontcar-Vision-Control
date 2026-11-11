@@ -61,6 +61,38 @@ static ring_corner_point_t point(float x,float y,unsigned kind)
     ring_corner_point_t p;memset(&p,0,sizeof(p));p.x=x;p.y=y;p.kind=(uint8_t)kind;p.quality=90;return p;
 }
 static int valid(unsigned side,unsigned y){return (flags[y]&(1U<<side))!=0;}
+/* A broad roundabout island can have a smooth upper shoulder instead of a
+ * local P extremum. Use only a supported, outward upper contour above a real
+ * lower A; ordinary continuous bends do not have the required side gap. */
+static ring_corner_point_t entry_shoulder(unsigned side,unsigned h,unsigned w,
+                                          const ring_corner_frame_t *f)
+{
+    ring_corner_point_t none={0};
+    if(!f->a[side].quality || !f->gap[side] || !f->continuous[1U-side]) return none;
+    unsigned ay=(unsigned)f->a[side].y;
+    /* A smooth shoulder is actionable only after its lower lip reaches the
+     * near half of the image. Earlier distant openings resemble ordinary
+     * roof noise and must retain the original P requirement. */
+    if(ay*100U<h*55U) return none;
+    /* The island must occupy at least a quarter of the image beyond A.
+     * Thin ordinary edge notches can otherwise mimic this smooth shoulder. */
+    float black_depth=side ? (float)(w-1U)-f->a[side].x : f->a[side].x;
+    if(black_depth<w*.25f) return none;
+    unsigned first=ay>h/2U ? ay-h/2U : 2U;
+    unsigned last=ay>h/6U ? ay-h/6U : 0U;
+    if(first<2U) first=2U;
+    if(last>=h-2U) last=h-3U;
+    unsigned best=0U;
+    for(unsigned y=first;y<=last;++y) {
+        if(!valid(side,y) || !valid(side,y-1U) || !valid(side,y+1U)) continue;
+        unsigned x=b[side][y];
+        if(x<w/20U || x+1U>=w-w/20U) continue;
+        float outward=side ? (float)x-f->a[side].x : f->a[side].x-(float)x;
+        if(outward<w*.08f) continue;
+        if(!best || (side ? x>b[side][best] : x<b[side][best])) best=y;
+    }
+    return best ? point(b[side][best],best,RING_CORNER_NONE) : none;
+}
 static void border_angles(unsigned h,unsigned w,ring_corner_frame_t *f)
 {
     /* Fit only the longest uninterrupted real border in 55%-90% of the
@@ -355,19 +387,22 @@ static void inner_v_guide(ring_corner_guide_t *g,unsigned inner,unsigned h,
 
 /* Keep the near center on the original offset. Steer the far center
  * inward only through white pixels in the same run as that offset. */
-static unsigned third_left_center(const uint8_t *row,unsigned x,unsigned w,float progress)
+static unsigned third_inward_center(const uint8_t *row,unsigned x,unsigned w,
+                                    unsigned inner,float progress)
 {
+    unsigned local=inner ? w-1U-x : x;
+    unsigned start=local;
     float amount=ring_third_left_center_shift;
     if(!isfinite(amount)) amount=.45f;
     float bend=progress*progress*(3.f-2.f*progress);
     unsigned shift=(unsigned)(w*clamp(amount,0.f,.65f)*bend+.5f);
-    unsigned limit=x>shift ? x-shift : 0U, start=x;
-    while(x>limit && row[x-1U]) --x;
-    if(x>limit || x==0U) {
-        unsigned room=start-x;
-        x+=room<2U ? room : 2U;
+    unsigned limit=local>shift ? local-shift : 0U;
+    while(local>limit && row[inner ? w-local : local-1U]) --local;
+    if(local>limit || local==0U) {
+        unsigned room=start-local;
+        local+=room<2U ? room : 2U;
     }
-    return x;
+    return inner ? w-1U-local : local;
 }
 static int third_center_link_white(const uint8_t *im,unsigned w,unsigned y0,unsigned x0,
                                   unsigned y1,unsigned x1)
@@ -398,11 +433,10 @@ static void third_finish(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
         int ok=y>=top && center>=0.f && center<w-1.f;
         unsigned x=(unsigned)clamp(center,0,w-1);
         if(ok && !im[y*w+x]) ok=0;
-        if(ok && !inner && y<near_start) {
+        if(ok && y<near_start) {
             float progress=(float)(near_start-y)/(near_start-top);
-            unsigned shifted=third_left_center(im+y*w,x,w,progress);
-            center-=(float)(x-shifted);
-            x=shifted;
+            x=third_inward_center(im+y*w,x,w,inner,progress);
+            center=(float)x;
         }
         unsigned index=0;
         while(index+1U<RING_CORNER_CENTER_SAMPLES &&
@@ -413,7 +447,7 @@ static void third_finish(const uint8_t *im,unsigned h,unsigned w,unsigned inner,
                 g->center[index]=(uint16_t)x;g->center_valid|=(uint16_t)(1U<<index);
                 if(linked && index) {
                     unsigned previous=(index-1U)*(h-1U)/(RING_CORNER_CENTER_SAMPLES-1U);
-                    if(inner || third_center_link_white(im,w,previous,g->center[index-1U],y,x))
+                    if(third_center_link_white(im,w,previous,g->center[index-1U],y,x))
                         g->center_link_valid|=(uint16_t)(1U<<index);
                 }
             }
@@ -750,12 +784,17 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
     if(f->v[1].quality && f->v[1].x<w*.45f) {f->v[0]=f->v[1];memset(&f->v[1],0,sizeof(f->v[1]));}
     f->paired=(uint8_t)(!f->bottom_open[0] && !f->bottom_open[1]);
     f->road_clear=(uint8_t)(f->paired && !f->gap[0] && !f->gap[1] && f->quality[0]>65 && f->quality[1]>65);
+    uint8_t shoulder_proxy[2]={0,0};
     for(unsigned side=0;side<2;++side) {
+        if(!f->p[side].quality) {
+            f->p[side]=entry_shoulder(side,h,w,f);
+            shoulder_proxy[side]=(uint8_t)(f->p[side].quality!=0);
+        }
         float ap_gap=f->a[side].y-f->p[side].y;
         f->entry[side]=(uint8_t)(f->gap[side] && f->a[side].quality && f->p[side].quality &&
             ap_gap>0.f && ap_gap*100.f>=h*RING_ENTRY_AP_MIN_GAP_PERCENT &&
             ap_gap*100.f<=h*RING_ENTRY_AP_MAX_GAP_PERCENT &&
-            island_point(im,h,w,side,&f->p[side]) &&
+            (shoulder_proxy[side] || island_point(im,h,w,side,&f->p[side])) &&
             f->continuous[1-side] && !f->gap[1-side]);
     }
     for(unsigned side=0;side<2;++side) mouth(side,h,w,f);
@@ -790,7 +829,10 @@ void ring_corner_process(const uint8_t *im,uint16_t h,uint16_t w,const ring_corn
         ring_corner_guide_t *g=&f->guide[ring_pdf_guide(stage,side)];
         ring_corner_point_t a=f->a[side],p=f->p[side],v=f->v[side],ov=f->v[other];
         g->corner_side=(uint8_t)side;g->corner_x=a.x;g->corner_y=a.y;
-        if(stage==1 && a.quality && p.quality) segment(g,side,p.x,p.y,a.x,a.y);
+        if(stage==1 && a.quality && p.quality) {
+            if(shoulder_proxy[side]) segment(g,side,p.x,p.y,outer,h-1);
+            else segment(g,side,p.x,p.y,a.x,a.y);
+        }
         if(stage==2 && p.quality) segment(g,side,p.x,p.y,outer,h-1);
         if(stage==3) inner_v_guide(g,side,h,f->entry_v[side].quality ? &f->entry_v[side] : &v);
         if(stage==4 && ov.quality) segment(g,other,ov.x,ov.y,side ? 0.f : w-1.f,h-1);

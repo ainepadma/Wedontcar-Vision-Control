@@ -63,13 +63,13 @@ static void release_without_alignment(void)
 static void rearm_tests(void)
 {
     uint32_t done=finish360(1000);
-    for(unsigned i=1;i<30;++i) {fresh(done+i*20U);assert(state.phase==RING_STATE_COOLDOWN);}
-    fresh(done+600);assert(state.phase==RING_STATE_IDLE && state.vote_frames==0 && state.completed_360==1);
+    for(unsigned i=1;i<=30;++i) {fresh(done+i*20U);assert(state.phase==RING_STATE_COOLDOWN);}
+    fresh(done+620);assert(state.phase==RING_STATE_IDLE && state.vote_frames==0 && state.completed_360==1);
     observation.corners.entry[0]=1;
-    fresh(done+620);assert(!state.action_locked && state.vote_frames==1);
-    ring_control_observe(&state,&observation,done+621,1);assert(state.vote_frames==1);
-    fresh(done+640);assert(!state.action_locked && state.vote_frames==2);
-    fresh(done+660);assert(state.action_locked && state.corner_stage==1 && state.kind==TRACK_RING_360);
+    fresh(done+640);assert(!state.action_locked && state.vote_frames==1);
+    ring_control_observe(&state,&observation,done+641,1);assert(state.vote_frames==1);
+    fresh(done+660);assert(!state.action_locked && state.vote_frames==2);
+    fresh(done+680);assert(state.action_locked && state.corner_stage==1 && state.kind==TRACK_RING_360);
     assert(state.completed_360==1); /* next legitimate lap allowed */
 
     done=finish360(1000);
@@ -85,16 +85,28 @@ static void rearm_tests(void)
     observation.handoff_bottom_error=81;fresh(done+251);assert(state.clear_frames==0);
     assert(state.completed_360==1);
 
+    done=finish360(1000);
+    observation.corners.road_clear=0;
+    for(unsigned i=1;i<=24;++i) fresh(done+i*20U);
+    assert(state.phase==RING_STATE_COOLDOWN && state.clear_frames==0);
+    good_road();
+    for(unsigned i=25;i<=54;++i) {
+        fresh(done+i*20U);
+        assert(state.phase==RING_STATE_COOLDOWN);
+    }
+    fresh(done+1100);
+    assert(state.phase==RING_STATE_IDLE);
+
     done=finish360(UINT32_MAX-20U);
     assert(done==19U);
-    for(unsigned i=1;i<=30;++i) fresh(done+i*20U);
+    for(unsigned i=1;i<=31;++i) fresh(done+i*20U);
     assert(state.phase==RING_STATE_IDLE && state.completed_360==1);
     done=finish360(UINT32_MAX-700U);
-    for(unsigned i=1;i<=30;++i) fresh(done+i*20U);
+    for(unsigned i=1;i<=31;++i) fresh(done+i*20U);
     assert(state.phase==RING_STATE_IDLE && state.completed_360==1);
     ring_control_init(&state);
     assert(!state.action_locked && state.phase==RING_STATE_IDLE && !state.completed_360 && !state.clear_frames && !state.tip_missing_frames);
-    puts("PASS 600ms AND 10-frame rearm, old-exit rejection, next lap, gaps, uint32 wrap and manual reset");
+    puts("PASS 600ms continuous clean road AND 10-frame rearm, delayed road, next lap, gaps, uint32 wrap and manual reset");
 }
 static void original270_tests(void)
 {
