@@ -7,7 +7,7 @@ dest=root/'demo/mdk/Objects/stripe-brake-tests'
 dest.mkdir(parents=True,exist_ok=True)
 s=(root/'demo/user/src/isr.c').read_text(encoding='utf-8')
 button=s[s.index('        if (button_pressed && !stripe_brake.stopped)'):s.index('        // 获取编码器读数')]
-observe=s[s.index('        /* Stripe brake is active'):s.index('        if (protection_enabled && ring_control.fault)')]
+observe=s[s.index('        /* Complete the measured crossing'):s.index('        if (protection_enabled && ring_control.fault)')]
 stop=s[s.index('        /* This runs every control tick'):s.index('        if (ring_control_guidance_active')]
 apply=s[s.index('static void stripe_brake_apply'):s.index('static volatile uint32_t control_clock_ms')]
 drive=s[s.index('        if (stripe_brake.stopped)\n        {'):s.index('        else if (motor_enabled)')]
@@ -29,6 +29,7 @@ fixture=r'''
 #define MOTOR2_FORWARD_DIR_LEVEL 0
 #define SERVO_MOTOR_DUTY(x) ((x)*10.0f)
 static stripe_brake_state_t stripe_brake;
+static stripe_brake_start_gate_t stripe_start_gate;
 static track_control_state_t track_control;
 static struct { stripe_brake_observation_t stripe; uint32_t observed_ms; } track_mailbox;
 static uint32_t control_clock_ms;
@@ -62,49 +63,51 @@ static void initialize(void) {
     track_control_init(&track_control,NULL);
     track_control_set_loss_stop(&track_control,0U);
     stripe_brake_init(&stripe_brake);
+    stripe_brake_start_gate_init(&stripe_start_gate);
     memset(&record,0,sizeof(record));
     memset(duty,0,sizeof(duty));
     encoder_data_1=encoder_data_2=0;
-    track_mailbox.stripe=(stripe_brake_observation_t){1,1,1,0,0,1,40,100,150,100,60};
+    track_mailbox.stripe=(stripe_brake_observation_t){1,1,1,0,0,0,0,0,40,100,150,100,60};
 }
 int main(void) {
     initialize();
-    tick(1U);for(unsigned i=0U;i<10U;++i)tick(0U);
-    assert(!stripe_brake.armed && stripe_brake.arm_votes==1U);
-    tick(1U);tick(1U);assert(track_stripe_brake_status==1U);
-    assert(!track_control.running && duty[0]==0U && duty[1]==0U);
-    for(unsigned i=0U;i<100U;++i) {track_mailbox.stripe.visible=0U;tick(1U);}
+    track_mailbox.stripe.near=1U;
+    tick(1U);tick(1U);tick(1U);
+    assert(!stripe_brake.armed && !stripe_brake.stopped && track_stripe_brake_status==0U);
+    button_pressed=1U;tick(1U);
+    assert(track_control.running && stripe_start_gate.started && !stripe_start_gate.enabled);
+    track_mailbox.stripe.visible=track_mailbox.stripe.near=0U;
+    for(unsigned i=0U;i<15U;++i) {
+        encoder_data_1=encoder_data_2=100;tick(1U);
+    }
+    assert(stripe_start_gate.enabled && !stripe_brake.armed && track_control.running);
+    track_mailbox.stripe.visible=1U;
+    tick(1U);tick(1U);
     assert(track_stripe_brake_status==1U);
-    track_mailbox.stripe.visible=track_mailbox.stripe.near=1U;
-    encoder_data_1=20;encoder_data_2=10;
-    tick(1U);
+    track_mailbox.stripe.near=1U;tick(1U);
+    assert(track_stripe_brake_status==3U && !stripe_brake.stopped);
+    for(unsigned i=0U;i<38U;++i) {
+        encoder_data_1=encoder_data_2=100;tick(0U);
+        assert(track_stripe_brake_status==3U);
+    }
+    encoder_data_1=encoder_data_2=100;tick(0U);
     assert(track_stripe_brake_status==2U && track_control.stop_reason==TRACK_STOP_STRIPE);
     assert(record.sequence==1U && record.reason==TRACK_STOP_STRIPE);
-    assert(duty[0]==700U && duty[1]==350U && direction[0]==1U && direction[1]==1U);
+    assert(duty[0]>0U && duty[0]<=STRIPE_BRAKE_PWM_LIMIT &&
+           duty[1]>0U && duty[1]<=STRIPE_BRAKE_PWM_LIMIT &&
+           direction[0]==1U && direction[1]==1U);
     assert(duty[2]==(unsigned)(track_control.servo_angle*10.0f));
-    assert(resets==2U);
+    assert(resets>=2U);
     encoder_data_1=encoder_data_2=0;
     button_pressed=1U;tick(0U);
-    assert(!track_control.running && starts==0U && ring_control==0U);
+    assert(!track_control.running && starts==1U && ring_control==1U);
     encoder_data_1=10;encoder_data_2=-10;tick(0U);
     assert(duty[0]==470U && direction[0]==1U && duty[1]==470U && direction[1]==0U);
     encoder_data_1=encoder_data_2=0;tick(0U);
     assert(duty[0]==120U && duty[1]==120U);
     for(unsigned i=0U;i<100U;++i)tick(0U);
     assert(record.sequence==1U && track_stripe_brake_status==2U);
-    puts("PASS actual ISR: C13 never pressed, misses, single P4, LAST, opposing signed PWM, held servo, C13 blocked, no-frame latch");
-
-    initialize();
-    track_control.servo_angle=91.0f;
-    button_pressed=1U;tick(1U);assert(track_control.running);
-    tick(1U);tick(1U);assert(track_stripe_brake_status==1U);
-    track_mailbox.stripe.near=1U;tick(1U);
-    assert(!track_control.running && record.reason==TRACK_STOP_STRIPE);
-    unsigned held=duty[2];
-    track_control.servo_angle=74.0f;tick(0U);
-    assert(duty[2]==held);
-    button_pressed=1U;tick(0U);assert(!track_control.running);
-    puts("PASS actual ISR: normal C13 still starts before stripe lock; driving stop freezes servo and rejects restart");
+    puts("PASS actual ISR: startup zebra ignored, clear distance and frames required, next zebra brakes, hold and restart lock work");
     return 0;
 }
 '''

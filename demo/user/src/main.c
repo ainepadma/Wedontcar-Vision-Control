@@ -104,6 +104,8 @@ void Init()
 }
 
 uint8_t image[MT9V03X_H][MT9V03X_W];
+/* Kept separate so the TFT and stripe detector still see the original bars. */
+static uint8_t stripe_road_image[MT9V03X_H][MT9V03X_W];
 uint32_t hist_gram[256];
 static uint8_t image_filter_scratch[5U * MT9V03X_W];
 static image_track_preprocess_state_t image_preprocess_state;
@@ -185,7 +187,7 @@ static void steering_log_service(void)
                     log_export_hash=2166136261U;
                     log_export_state=1U;
                     log_queue(snprintf((char *)camera_tx_packet,sizeof(camera_tx_packet),
-                        "\r\n#LOG BEGIN %lu %lu %lu FW=0.33.0\r\n%s",
+                        "\r\n#LOG BEGIN %lu %lu %lu FW=0.34.0\r\n%s",
                         (unsigned long)info.session,(unsigned long)info.count,
                         (unsigned long)info.overwritten,steering_log_csv_header()));
                 }
@@ -292,7 +294,7 @@ static void assistant_send_image(void)
     uint8_t snapshot_imu_status = imu_device_status;
     interrupt_global_enable(primask);
     int prefix_length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#CAM FW=0.33.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
+        "#CAM FW=0.34.0 T=%lu CAP=%lu VF=%lu PROC=%lu DISP=%lu CFPS=%lu PFPS=%lu DFPS=%lu IO=%u MOTOR=%u MFAULT=%u PROTECT=%u FULL=%u EXP=%u STATUS=%u TRACK=%u Q=%u VR=%u/%u N=%u F=%u NW=%u FW=%u WG=%u RC=%u RD=%d REJ=%02X NC=%u AM=%u DC=%u ERR=%d HEAD=%d READY=%u STOP=%u SERVO10=%d TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u THR=%u BAD=%lu IMU=%u ID=%02X IS=%lu IB=%u IBS=%u AF=%d AL=%d AU=%d GY=%d YR10=%d RS=%u RDIR=%d RY10=%d RT=%u ENT=%u PASS=%u EXT=%u PATH=%u RF=%u JN=%u LO=%u RO=%u FV=%u LQ=%u RQ=%u CE=%d CH=%d ES=%u XS=%u NP=%u NO=%u TL=%u TR=%u WB=%u SS=%u LA=%u CL=%u CR=%u CS=%u CG=%u CVF=%lu CGF=%lu HOLD=%u AP=%u AR=%u CT=%u NE=%d NH=%d NV=%u NRO=%u ER=%u BE=%d BV=%u\r\n",
         (unsigned long)timer_get(GPT_TIM_1), (unsigned long)mt9v03x_frame_count,
         (unsigned long)track_result.frame_number, (unsigned long)processed_frames,
         (unsigned long)displayed_frames,
@@ -393,7 +395,7 @@ static void assistant_send_speed(uint32_t now)
     int32_t left_total = encoder_total_l, right_total = encoder_total_r;
     interrupt_global_enable(primask);
     int length = snprintf((char *)camera_tx_packet, CAMERA_DIAGNOSTIC_SIZE,
-        "#SPD FW=0.33.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
+        "#SPD FW=0.34.0 T=%lu MOTOR=%u PROTECT=%u FULL=%u STOP=%u MFAULT=%u TARGET10=%d LSPD=%d RSPD=%d LPWM=%u RPWM=%u LTOT=%ld RTOT=%ld\r\n",
         (unsigned long)now, (unsigned int)running, (unsigned int)protection,
         (unsigned int)full, (unsigned int)stop, (unsigned int)fault,
         (int)(target * 10.0f), (int)left, (int)right,
@@ -577,6 +579,8 @@ static void screen_draw_stats(void)
         tft180_show_string(0,118,line);
         if (track_stripe_brake_status == 2U)
             snprintf(line,sizeof(line),"LOCKED RESET  ");
+        else if (track_stripe_brake_status == 3U)
+            snprintf(line,sizeof(line),"STRIPE PASS   ");
         else if (track_stripe_brake_status == 1U)
             snprintf(line,sizeof(line),"STRIPE ARMED  ");
         else
@@ -620,6 +624,8 @@ static void screen_draw_stats(void)
     tft180_show_string(0, 118, line);
     if (track_stripe_brake_status == 2U)
         tft180_show_string(0, 134, "STRIPE LOCKED ");
+    else if (track_stripe_brake_status == 3U)
+        tft180_show_string(0, 134, "STRIPE PASS   ");
     else if (track_stripe_brake_status == 1U)
         tft180_show_string(0, 134, "STRIPE ARMED  ");
     else if (motor_feedback_fault)
@@ -936,12 +942,31 @@ int main(void)
             {
                 camera_threshold = 255U;
             }
+            stripe_brake_observation_t stripe_observation;
+            memset(&stripe_observation, 0, sizeof(stripe_observation));
+#if !SERVO_CENTER_TEST_MODE && !SPEED_BENCH_MODE
+            if (camera_threshold != 255U)
+                stripe_brake_detect((uint8_t *)image, MT9V03X_H, MT9V03X_W,
+                                    &stripe_observation);
+#endif
+            /* A repeated-bar marker is a stop line, not an obstacle to steer
+             * around. Only the road algorithms receive this repaired copy. */
+            const uint8_t *road_image = (uint8_t *)image;
+            if (camera_threshold != 255U &&
+                stripe_observation.visible &&
+                (stripe_observation.complete || stripe_observation.partial))
+            {
+                stripe_brake_road_view((uint8_t *)image,
+                    (uint8_t *)stripe_road_image, MT9V03X_H, MT9V03X_W,
+                    &stripe_observation);
+                road_image = (uint8_t *)stripe_road_image;
+            }
             // 在叠加调试线之前识别赛道，并将一帧完整结果交给控制中断。
             if (camera_threshold != 255U)
             {
-                track_vision_process((uint8_t *)image, MT9V03X_H, MT9V03X_W, &track_result);
+                track_vision_process(road_image, MT9V03X_H, MT9V03X_W, &track_result);
                 track_result.frame_number = frame_number;
-                track_ring_vision_process(&ring_vision_model, (uint8_t *)image,
+                track_ring_vision_process(&ring_vision_model, road_image,
                                           MT9V03X_H, MT9V03X_W, &track_result);
             }
             else
@@ -952,13 +977,6 @@ int main(void)
             }
             if (!track_result.valid)
                 ++invalid_vision_frames;
-            stripe_brake_observation_t stripe_observation;
-            memset(&stripe_observation, 0, sizeof(stripe_observation));
-#if !SERVO_CENTER_TEST_MODE && !SPEED_BENCH_MODE
-            if (camera_threshold != 255U)
-                stripe_brake_detect((uint8_t *)image, MT9V03X_H, MT9V03X_W,
-                                    &stripe_observation);
-#endif
             track_frame_publish(&track_result, &stripe_observation);
             screen_preview_observe(timer_get(GPT_TIM_1));
 
